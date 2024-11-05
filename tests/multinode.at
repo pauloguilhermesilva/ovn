@@ -2702,15 +2702,27 @@ AT_CHECK([m_as ovn-central-az3-1 ovn-nbctl lr-route-list lr3 |
 
 # Ping IPv4 test Inter-AZ - AZ1 vs AZ2
 M_NS_CHECK_EXEC([ovn-chassis-1], [sw1-az1-p1], [ping -q -c 3 -i 0.3 -w 2 10.0.2.3 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
 
 # Ping IPv4 test Inter-AZ - AZ1 vs AZ3
 M_NS_CHECK_EXEC([ovn-chassis-1], [sw1-az1-p1], [ping -q -c 3 -i 0.3 -w 2 10.0.3.3 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
 
 # Ping IPv6 test Inter-AZ - AZ1 vs AZ2
 M_NS_CHECK_EXEC([ovn-chassis-1], [sw1-az1-p1], [ping6 -q -c 3 -i 0.3 -w 2 2002::3 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
 
 # Ping IPv6 test Inter-AZ - AZ1 vs AZ3
 M_NS_CHECK_EXEC([ovn-chassis-1], [sw1-az1-p1], [ping6 -q -c 3 -i 0.3 -w 2 2003::3 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
 
 # Filter advertised routes by LRP - AZ1
 check m_as ovn-central-az1-1 ovn-nbctl --wait=sb set logical_router_port lr1-ts-1 options:ic-route-filter-adv=10.0.1.0/24

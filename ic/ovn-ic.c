@@ -1457,7 +1457,7 @@ sync_learned_routes(struct ic_context *ctx,
                 continue;
             }
             if (!route_need_learn(ic_lr->lr, isb_route, &prefix, plen,
-                                  &nb_global->options, ts_lrp)) {
+                                  &nb_global->options, lrp)) {
                 continue;
             }
 
@@ -1743,7 +1743,7 @@ collect_lr_routes(struct ic_context *ctx,
             route_tag = "";
         }
         build_ts_routes_to_adv(ctx, ic_lr, routes_ad, &ts_port_addrs,
-                               nb_global, route_table, route_tag, ts_lrp);
+                               nb_global, route_table, route_tag, lrp);
         destroy_lport_addresses(&ts_port_addrs);
     }
 }
