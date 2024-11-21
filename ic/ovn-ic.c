@@ -1047,10 +1047,12 @@ prefix_is_filtered(const struct smap *nb_options,
     if (denylist) {
         ds_put_format(&filter_list, "%s,", denylist);
     }
-    const char *lrp_route_filter = smap_get(&ts_lrp->options,
-                                            filter_direction);
-    if (lrp_route_filter) {
-        ds_put_format(&filter_list, "%s,", lrp_route_filter);
+    if (ts_lrp) {
+        const char *lrp_route_filter = smap_get(&ts_lrp->options,
+                                         filter_direction);
+        if (lrp_route_filter) {
+            ds_put_format(&filter_list, "%s,", lrp_route_filter);
+        }
     }
     const char *lr_route_filter = smap_get(&nb_lr->options,
                                            filter_direction);
