@@ -886,6 +886,9 @@ add_matches_to_flow_table(const struct sbrec_logical_flow *lflow,
         .in_port_sec_ptable = OFTABLE_CHK_IN_PORT_SEC,
         .out_port_sec_ptable = OFTABLE_CHK_OUT_PORT_SEC,
         .mac_cache_use_table = OFTABLE_MAC_CACHE_USE,
+        .ct_nw_dst_load_table = OFTABLE_CT_ORIG_NW_DST_LOAD,
+        .ct_ip6_dst_load_table = OFTABLE_CT_ORIG_IP6_DST_LOAD,
+        .ct_tp_dst_load_table = OFTABLE_CT_ORIG_TP_DST_LOAD,
         .ctrl_meter_id = ctrl_meter_id,
         .common_nat_ct_zone = get_common_nat_zone(ldp),
     };
@@ -2266,7 +2269,8 @@ lflow_add_flows_for_datapath(const struct sbrec_datapath_binding *dp,
 bool
 lflow_handle_flows_for_lport(const struct sbrec_port_binding *pb,
                              struct lflow_ctx_in *l_ctx_in,
-                             struct lflow_ctx_out *l_ctx_out)
+                             struct lflow_ctx_out *l_ctx_out,
+                             bool deleted)
 {
     bool changed;
 
@@ -2287,6 +2291,9 @@ lflow_handle_flows_for_lport(const struct sbrec_port_binding *pb,
      * port binding'uuid', then this function should handle it properly.
      */
     ofctrl_remove_flows(l_ctx_out->flow_table, &pb->header_.uuid);
+    if (deleted) {
+        return true;
+    }
 
     if (pb->n_port_security && shash_find(l_ctx_in->binding_lports,
                                           pb->logical_port)) {

@@ -62,6 +62,7 @@
 #include "lflow.h"
 #include "ip-mcast.h"
 #include "ovn-sb-idl.h"
+#include "ovn-dns.h"
 
 VLOG_DEFINE_THIS_MODULE(pinctrl);
 
@@ -79,13 +80,6 @@ VLOG_DEFINE_THIS_MODULE(pinctrl);
  * A Mutex - 'pinctrl_mutex' is used between the pinctrl_handler() thread
  * and pinctrl_run().
  *
- *   - dns_lookup -     In order to do a DNS lookup, this action needs
- *                      to access the 'DNS' table. pinctrl_run() builds a
- *                      local DNS cache - 'dns_cache'. See sync_dns_cache()
- *                      for more details.
- *                      The function 'pinctrl_handle_dns_lookup()' (which is
- *                      called with in the pinctrl_handler thread) looks into
- *                      the local DNS cache to resolve the DNS requests.
  *
  *   - put_arp/put_nd - These actions stores the IPv4/IPv6 and MAC addresses
  *                      in the 'MAC_Binding' table.
@@ -180,7 +174,6 @@ struct pinctrl {
     struct latch pinctrl_thread_exit;
     bool mac_binding_can_timestamp;
     bool fdb_can_timestamp;
-    bool dns_supports_ovn_owned;
     bool igmp_group_has_chassis_name;
     bool igmp_support_protocol;
 };
@@ -191,6 +184,7 @@ static void init_buffered_packets_ctx(void);
 static void destroy_buffered_packets_ctx(void);
 static void
 run_buffered_binding(const struct sbrec_mac_binding_table *mac_binding_table,
+                     const struct hmap *local_datapaths,
                      struct ovsdb_idl_index *sbrec_port_binding_by_key,
                      struct ovsdb_idl_index *sbrec_datapath_binding_by_key,
                      struct ovsdb_idl_index *sbrec_port_binding_by_name,
@@ -1539,18 +1533,19 @@ pinctrl_handle_buffered_packets(const struct ofputil_packet_in *pin,
 OVS_REQUIRES(pinctrl_mutex)
 {
     const struct match *md = &pin->flow_metadata;
-    struct mac_binding_data mb_data = (struct mac_binding_data) {
-            .dp_key =  ntohll(md->flow.metadata),
-            .port_key =  md->flow.regs[MFF_LOG_OUTPORT - MFF_REG0],
-            .mac = eth_addr_zero,
-    };
+    struct mac_binding_data mb_data;
+    struct in6_addr ip;
 
     if (is_arp) {
-        mb_data.ip = in6_addr_mapped_ipv4(htonl(md->flow.regs[0]));
+        ip = in6_addr_mapped_ipv4(htonl(md->flow.regs[0]));
     } else {
         ovs_be128 ip6 = hton128(flow_get_xxreg(&md->flow, 0));
-        memcpy(&mb_data.ip, &ip6, sizeof mb_data.ip);
+        memcpy(&ip, &ip6, sizeof ip);
     }
+
+    mac_binding_data_init(&mb_data, ntohll(md->flow.metadata),
+                          md->flow.regs[MFF_LOG_OUTPORT - MFF_REG0],
+                          ip, eth_addr_zero);
 
     struct buffered_packets *bp = buffered_packets_add(&buffered_packets_ctx,
                                                        mb_data);
@@ -3272,93 +3267,6 @@ put_be32(struct ofpbuf *buf, ovs_be32 x)
     ofpbuf_put(buf, &x, sizeof x);
 }
 
-struct dns_data {
-    uint64_t *dps;
-    size_t n_dps;
-    struct smap records;
-    struct smap options;
-    bool delete;
-};
-
-static struct shash dns_cache = SHASH_INITIALIZER(&dns_cache);
-
-/* Called by pinctrl_run(). Runs within the main ovn-controller
- * thread context. */
-static void
-sync_dns_cache(const struct sbrec_dns_table *dns_table)
-    OVS_REQUIRES(pinctrl_mutex)
-{
-    struct shash_node *iter;
-    SHASH_FOR_EACH (iter, &dns_cache) {
-        struct dns_data *d = iter->data;
-        d->delete = true;
-    }
-
-    const struct sbrec_dns *sbrec_dns;
-    SBREC_DNS_TABLE_FOR_EACH (sbrec_dns, dns_table) {
-        const char *dns_id = smap_get(&sbrec_dns->external_ids, "dns_id");
-        if (!dns_id) {
-            continue;
-        }
-
-        struct dns_data *dns_data = shash_find_data(&dns_cache, dns_id);
-        if (!dns_data) {
-            dns_data = xmalloc(sizeof *dns_data);
-            smap_init(&dns_data->records);
-            smap_init(&dns_data->options);
-            shash_add(&dns_cache, dns_id, dns_data);
-            dns_data->n_dps = 0;
-            dns_data->dps = NULL;
-        } else {
-            free(dns_data->dps);
-        }
-
-        dns_data->delete = false;
-
-        if (!smap_equal(&dns_data->records, &sbrec_dns->records)) {
-            smap_destroy(&dns_data->records);
-            smap_clone(&dns_data->records, &sbrec_dns->records);
-        }
-
-        if (pinctrl.dns_supports_ovn_owned
-            && !smap_equal(&dns_data->options, &sbrec_dns->options)) {
-            smap_destroy(&dns_data->options);
-            smap_clone(&dns_data->options, &sbrec_dns->options);
-        }
-
-        dns_data->n_dps = sbrec_dns->n_datapaths;
-        dns_data->dps = xcalloc(dns_data->n_dps, sizeof(uint64_t));
-        for (size_t i = 0; i < sbrec_dns->n_datapaths; i++) {
-            dns_data->dps[i] = sbrec_dns->datapaths[i]->tunnel_key;
-        }
-    }
-
-    SHASH_FOR_EACH_SAFE (iter, &dns_cache) {
-        struct dns_data *d = iter->data;
-        if (d->delete) {
-            shash_delete(&dns_cache, iter);
-            smap_destroy(&d->records);
-            smap_destroy(&d->options);
-            free(d->dps);
-            free(d);
-        }
-    }
-}
-
-static void
-destroy_dns_cache(void)
-{
-    struct shash_node *iter;
-    SHASH_FOR_EACH_SAFE (iter, &dns_cache) {
-        struct dns_data *d = iter->data;
-        shash_delete(&dns_cache, iter);
-        smap_destroy(&d->records);
-        smap_destroy(&d->options);
-        free(d->dps);
-        free(d);
-    }
-}
-
 /* Populates dns_answer struct with base data.
  * Copy the answer section
  * Format of the answer section is
@@ -3436,7 +3344,6 @@ pinctrl_handle_dns_lookup(
     struct rconn *swconn,
     struct dp_packet *pkt_in, struct ofputil_packet_in *pin,
     struct ofpbuf *userdata, struct ofpbuf *continuation)
-    OVS_REQUIRES(pinctrl_mutex)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
     enum ofp_version version = rconn_get_version(swconn);
@@ -3541,31 +3448,9 @@ pinctrl_handle_dns_lookup(
     uint32_t query_l4_size = rest - l4_start;
 
     uint64_t dp_key = ntohll(pin->flow_metadata.flow.metadata);
-    const char *answer_data = NULL;
     bool ovn_owned = false;
-    struct shash_node *iter;
-    SHASH_FOR_EACH (iter, &dns_cache) {
-        struct dns_data *d = iter->data;
-        ovn_owned = smap_get_bool(&d->options, "ovn-owned", false);
-        for (size_t i = 0; i < d->n_dps; i++) {
-            if (d->dps[i] == dp_key) {
-                /* DNS records in SBDB are stored in lowercase. Convert to
-                 * lowercase to perform case insensitive lookup
-                 */
-                char *query_name_lower = str_tolower(ds_cstr(&query_name));
-                answer_data = smap_get(&d->records, query_name_lower);
-                free(query_name_lower);
-                if (answer_data) {
-                    break;
-                }
-            }
-        }
-
-        if (answer_data) {
-            break;
-        }
-    }
-
+    const char *answer_data = ovn_dns_lookup(ds_cstr(&query_name), dp_key,
+                                             &ovn_owned);
     ds_destroy(&query_name);
     if (!answer_data) {
         goto exit;
@@ -3799,10 +3684,8 @@ process_packet_in(struct rconn *swconn, const struct ofp_header *msg)
         break;
 
     case ACTION_OPCODE_DNS_LOOKUP:
-        ovs_mutex_lock(&pinctrl_mutex);
         pinctrl_handle_dns_lookup(swconn, &packet, &pin, &userdata,
                                   &continuation);
-        ovs_mutex_unlock(&pinctrl_mutex);
         break;
 
     case ACTION_OPCODE_LOG:
@@ -4100,15 +3983,6 @@ pinctrl_update(const struct ovsdb_idl *idl)
         notify_pinctrl_handler();
     }
 
-    bool dns_supports_ovn_owned = sbrec_server_has_dns_table_col_options(idl);
-    if (dns_supports_ovn_owned != pinctrl.dns_supports_ovn_owned) {
-        pinctrl.dns_supports_ovn_owned = dns_supports_ovn_owned;
-
-        /* Notify pinctrl_handler that fdb timestamp column
-       * availability has changed. */
-        notify_pinctrl_handler();
-    }
-
     bool igmp_group_has_chassis_name =
         sbrec_server_has_igmp_group_table_col_chassis_name(idl);
     if (igmp_group_has_chassis_name != pinctrl.igmp_group_has_chassis_name) {
@@ -4141,7 +4015,6 @@ pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
             struct ovsdb_idl_index *sbrec_igmp_groups,
             struct ovsdb_idl_index *sbrec_ip_multicast_opts,
             struct ovsdb_idl_index *sbrec_fdb_by_dp_key_mac,
-            const struct sbrec_dns_table *dns_table,
             const struct sbrec_controller_event_table *ce_table,
             const struct sbrec_service_monitor_table *svc_mon_table,
             const struct sbrec_mac_binding_table *mac_binding_table,
@@ -4168,14 +4041,14 @@ pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
     prepare_ipv6_prefixd(ovnsb_idl_txn, sbrec_port_binding_by_name,
                          local_active_ports_ipv6_pd, chassis,
                          active_tunnels, local_datapaths);
-    sync_dns_cache(dns_table);
     controller_event_run(ovnsb_idl_txn, ce_table, chassis);
     ip_mcast_sync(ovnsb_idl_txn, chassis, local_datapaths,
                   sbrec_datapath_binding_by_key,
                   sbrec_port_binding_by_key,
                   sbrec_igmp_groups,
                   sbrec_ip_multicast_opts);
-    run_buffered_binding(mac_binding_table, sbrec_port_binding_by_key,
+    run_buffered_binding(mac_binding_table, local_datapaths,
+                         sbrec_port_binding_by_key,
                          sbrec_datapath_binding_by_key,
                          sbrec_port_binding_by_name,
                          sbrec_mac_binding_by_lport_ip);
@@ -4704,7 +4577,6 @@ pinctrl_destroy(void)
     event_table_destroy();
     destroy_put_mac_bindings();
     destroy_put_vport_bindings();
-    destroy_dns_cache();
     ip_mcast_snoop_destroy();
     destroy_svc_monitors();
     bfd_monitor_destroy();
@@ -4942,6 +4814,7 @@ run_put_mac_bindings(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
 static void
 run_buffered_binding(const struct sbrec_mac_binding_table *mac_binding_table,
+                     const struct hmap *local_datapaths,
                      struct ovsdb_idl_index *sbrec_port_binding_by_key,
                      struct ovsdb_idl_index *sbrec_datapath_binding_by_key,
                      struct ovsdb_idl_index *sbrec_port_binding_by_name,
@@ -4956,12 +4829,25 @@ run_buffered_binding(const struct sbrec_mac_binding_table *mac_binding_table,
 
     const struct sbrec_mac_binding *smb;
     SBREC_MAC_BINDING_TABLE_FOR_EACH_TRACKED (smb, mac_binding_table) {
+        if (sbrec_mac_binding_is_deleted(smb)) {
+            continue;
+        }
+
+        if (!get_local_datapath(local_datapaths, smb->datapath->tunnel_key)) {
+            continue;
+        }
+
         const struct sbrec_port_binding *pb = lport_lookup_by_name(
             sbrec_port_binding_by_name, smb->logical_port);
 
+        if (!pb || !pb->datapath) {
+            continue;
+        }
+
         struct mac_binding_data mb_data;
-        if (!mac_binding_data_from_sbrec(&mb_data, smb,
-                                         sbrec_port_binding_by_name)) {
+
+        if (!mac_binding_data_parse(&mb_data, smb->datapath->tunnel_key,
+                                    pb->tunnel_key, smb->ip, smb->mac)) {
             continue;
         }
 
@@ -8981,7 +8867,7 @@ static void
 pinctrl_handle_put_fdb(const struct flow *md, const struct flow *headers)
                        OVS_REQUIRES(pinctrl_mutex)
 {
-    if (hmap_count(&put_mac_bindings) >= MAX_FDB_ENTRIES) {
+    if (hmap_count(&put_fdbs) >= MAX_FDB_ENTRIES) {
         COVERAGE_INC(pinctrl_drop_put_mac_binding);
         return;
     }

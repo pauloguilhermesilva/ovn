@@ -95,6 +95,10 @@ struct uuid;
 #define OFTABLE_CHK_LB_AFFINITY          78
 #define OFTABLE_MAC_CACHE_USE            79
 #define OFTABLE_CT_ZONE_LOOKUP           80
+#define OFTABLE_CT_ORIG_NW_DST_LOAD      81
+#define OFTABLE_CT_ORIG_IP6_DST_LOAD     82
+#define OFTABLE_CT_ORIG_TP_DST_LOAD      83
+
 
 struct lflow_ctx_in {
     struct ovsdb_idl_index *sbrec_multicast_group_by_name_datapath;
@@ -186,7 +190,8 @@ bool lflow_add_flows_for_datapath(const struct sbrec_datapath_binding *,
                                   struct lflow_ctx_out *);
 bool lflow_handle_flows_for_lport(const struct sbrec_port_binding *,
                                   struct lflow_ctx_in *,
-                                  struct lflow_ctx_out *);
+                                  struct lflow_ctx_out *,
+                                  bool deleted);
 bool lflow_handle_changed_mc_groups(struct lflow_ctx_in *,
                                     struct lflow_ctx_out *);
 bool lflow_handle_changed_port_bindings(struct lflow_ctx_in *,

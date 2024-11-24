@@ -87,6 +87,7 @@
 #include "statctrl.h"
 #include "lib/dns-resolve.h"
 #include "ct-zone.h"
+#include "ovn-dns.h"
 
 VLOG_DEFINE_THIS_MODULE(main);
 
@@ -101,6 +102,8 @@ static unixctl_cb_func debug_status_execution;
 static unixctl_cb_func debug_dump_local_bindings;
 static unixctl_cb_func debug_dump_related_lports;
 static unixctl_cb_func debug_dump_local_template_vars;
+static unixctl_cb_func debug_dump_local_mac_bindings;
+static unixctl_cb_func debug_dump_peer_ports;
 static unixctl_cb_func debug_dump_lflow_conj_ids;
 static unixctl_cb_func lflow_cache_flush_cmd;
 static unixctl_cb_func lflow_cache_show_stats_cmd;
@@ -2932,26 +2935,22 @@ en_lb_data_cleanup(void *data)
 
 static void
 mac_binding_add_sb(struct mac_cache_data *data,
-                   const struct sbrec_mac_binding *smb,
-                   struct ovsdb_idl_index *sbrec_pb_by_name)
+                   const struct sbrec_mac_binding *smb)
 {
     struct mac_binding_data mb_data;
-    if (!mac_binding_data_from_sbrec(&mb_data, smb, sbrec_pb_by_name)) {
+    if (!mac_binding_data_from_sbrec(&mb_data, smb)) {
         return;
     }
 
-    struct mac_binding *mb = mac_binding_add(&data->mac_bindings, mb_data, 0);
-
-    mb->sbrec_mb = smb;
+    mac_binding_add(&data->mac_bindings, mb_data, 0);
 }
 
 static void
 mac_binding_remove_sb(struct mac_cache_data *data,
-                      const struct sbrec_mac_binding *smb,
-                      struct ovsdb_idl_index *sbrec_pb_by_name)
+                      const struct sbrec_mac_binding *smb)
 {
     struct mac_binding_data mb_data;
-    if (!mac_binding_data_from_sbrec(&mb_data, smb, sbrec_pb_by_name)) {
+    if (!mac_binding_data_from_sbrec(&mb_data, smb)) {
         return;
     }
 
@@ -2995,8 +2994,7 @@ fdb_remove_sb(struct mac_cache_data *data, const struct sbrec_fdb *sfdb)
 static void
 mac_cache_mb_handle_for_datapath(struct mac_cache_data *data,
                                  const struct sbrec_datapath_binding *dp,
-                                 struct ovsdb_idl_index *sbrec_mb_by_dp,
-                                 struct ovsdb_idl_index *sbrec_pb_by_name)
+                                 struct ovsdb_idl_index *sbrec_mb_by_dp)
 {
     bool has_threshold = mac_cache_threshold_find(data, dp->tunnel_key);
 
@@ -3007,9 +3005,9 @@ mac_cache_mb_handle_for_datapath(struct mac_cache_data *data,
     const struct sbrec_mac_binding *mb;
     SBREC_MAC_BINDING_FOR_EACH_EQUAL (mb, mb_index_row, sbrec_mb_by_dp) {
         if (has_threshold) {
-            mac_binding_add_sb(data, mb, sbrec_pb_by_name);
+            mac_binding_add_sb(data, mb);
         } else {
-            mac_binding_remove_sb(data, mb, sbrec_pb_by_name);
+            mac_binding_remove_sb(data, mb);
         }
     }
 
@@ -3064,10 +3062,6 @@ en_mac_cache_run(struct engine_node *node, void *data)
             engine_ovsdb_node_get_index(
                     engine_get_input("SB_mac_binding", node),
                     "datapath");
-    struct ovsdb_idl_index *sbrec_pb_by_name =
-            engine_ovsdb_node_get_index(
-                    engine_get_input("SB_port_binding", node),
-                    "name");
     struct ovsdb_idl_index *sbrec_fdb_by_dp_key =
             engine_ovsdb_node_get_index(
                     engine_get_input("SB_fdb", node),
@@ -3086,7 +3080,7 @@ en_mac_cache_run(struct engine_node *node, void *data)
 
         mac_cache_threshold_add(cache_data, sbrec_dp);
         mac_cache_mb_handle_for_datapath(cache_data, sbrec_dp,
-                                         sbrec_mb_by_dp, sbrec_pb_by_name);
+                                         sbrec_mb_by_dp);
         mac_cache_fdb_handle_for_datapath(cache_data, sbrec_dp,
                                           sbrec_fdb_by_dp_key);
     }
@@ -3102,11 +3096,6 @@ mac_cache_sb_mac_binding_handler(struct engine_node *node, void *data)
             engine_get_input_data("runtime_data", node);
     const struct sbrec_mac_binding_table *mb_table =
             EN_OVSDB_GET(engine_get_input("SB_mac_binding", node));
-    struct ovsdb_idl_index *sbrec_pb_by_name =
-            engine_ovsdb_node_get_index(
-                    engine_get_input("SB_port_binding", node),
-                    "name");
-
     size_t previous_size = hmap_count(&cache_data->mac_bindings);
 
     const struct sbrec_mac_binding *sbrec_mb;
@@ -3116,8 +3105,7 @@ mac_cache_sb_mac_binding_handler(struct engine_node *node, void *data)
         }
 
         if (!sbrec_mac_binding_is_new(sbrec_mb)) {
-            mac_binding_remove_sb(cache_data, sbrec_mb,
-                                  sbrec_pb_by_name);
+            mac_binding_remove_sb(cache_data, sbrec_mb);
         }
 
         if (sbrec_mac_binding_is_deleted(sbrec_mb) ||
@@ -3128,7 +3116,7 @@ mac_cache_sb_mac_binding_handler(struct engine_node *node, void *data)
 
         if (mac_cache_threshold_find(cache_data,
                                      sbrec_mb->datapath->tunnel_key)) {
-            mac_binding_add_sb(cache_data, sbrec_mb, sbrec_pb_by_name);
+            mac_binding_add_sb(cache_data, sbrec_mb);
         }
     }
 
@@ -3189,10 +3177,6 @@ mac_cache_runtime_data_handler(struct engine_node *node, void *data OVS_UNUSED)
             engine_ovsdb_node_get_index(
                     engine_get_input("SB_mac_binding", node),
                     "datapath");
-    struct ovsdb_idl_index *sbrec_pb_by_name =
-            engine_ovsdb_node_get_index(
-                    engine_get_input("SB_port_binding", node),
-                    "name");
     struct ovsdb_idl_index *sbrec_fdb_by_dp_key =
             engine_ovsdb_node_get_index(
                     engine_get_input("SB_fdb", node),
@@ -3217,7 +3201,7 @@ mac_cache_runtime_data_handler(struct engine_node *node, void *data OVS_UNUSED)
 
     HMAP_FOR_EACH (tdp, node, &rt_data->tracked_dp_bindings) {
         mac_cache_mb_handle_for_datapath(cache_data, tdp->dp,
-                                         sbrec_mb_by_dp, sbrec_pb_by_name);
+                                         sbrec_mb_by_dp);
 
         mac_cache_fdb_handle_for_datapath(cache_data, tdp->dp,
                                           sbrec_fdb_by_dp_key);
@@ -3243,10 +3227,6 @@ mac_cache_sb_datapath_binding_handler(struct engine_node *node, void *data)
             engine_ovsdb_node_get_index(
                     engine_get_input("SB_mac_binding", node),
                     "datapath");
-    struct ovsdb_idl_index *sbrec_pb_by_name =
-            engine_ovsdb_node_get_index(
-                    engine_get_input("SB_port_binding", node),
-                    "name");
     struct ovsdb_idl_index *sbrec_fdb_by_dp_key =
             engine_ovsdb_node_get_index(
                     engine_get_input("SB_fdb", node),
@@ -3274,7 +3254,7 @@ mac_cache_sb_datapath_binding_handler(struct engine_node *node, void *data)
 
     SBREC_DATAPATH_BINDING_TABLE_FOR_EACH_TRACKED (sbrec_dp, dp_table) {
         mac_cache_mb_handle_for_datapath(cache_data, sbrec_dp,
-                                         sbrec_mb_by_dp, sbrec_pb_by_name);
+                                         sbrec_mb_by_dp);
 
         mac_cache_fdb_handle_for_datapath(cache_data, sbrec_dp,
                                           sbrec_fdb_by_dp_key);
@@ -3342,6 +3322,44 @@ en_bfd_chassis_cleanup(void *data OVS_UNUSED){
     struct ed_type_bfd_chassis *bfd_chassis = data;
     sset_destroy(&bfd_chassis->bfd_chassis);
 }
+
+static void *
+en_dns_cache_init(struct engine_node *node OVS_UNUSED,
+                  struct engine_arg *arg OVS_UNUSED)
+{
+    ovn_dns_cache_init();
+    return NULL;
+}
+
+static void
+en_dns_cache_run(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct sbrec_dns_table *dns_table =
+        EN_OVSDB_GET(engine_get_input("SB_dns", node));
+
+    ovn_dns_sync_cache(dns_table);
+
+    engine_set_node_state(node, EN_UPDATED);
+}
+
+static bool
+dns_cache_sb_dns_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct sbrec_dns_table *dns_table =
+        EN_OVSDB_GET(engine_get_input("SB_dns", node));
+
+    ovn_dns_update_cache(dns_table);
+
+    engine_set_node_state(node, EN_UPDATED);
+    return true;
+}
+
+static void
+en_dns_cache_cleanup(void *data OVS_UNUSED)
+{
+    ovn_dns_cache_destroy();
+}
+
 
 /* Engine node which is used to handle the Non VIF data like
  *   - OVS patch ports
@@ -4253,8 +4271,9 @@ lflow_output_runtime_data_handler(struct engine_node *node,
         struct shash_node *shash_node;
         SHASH_FOR_EACH (shash_node, &tdp->lports) {
             struct tracked_lport *lport = shash_node->data;
-            if (!lflow_handle_flows_for_lport(lport->pb, &l_ctx_in,
-                                                &l_ctx_out)) {
+            if (!lflow_handle_flows_for_lport(
+                    lport->pb, &l_ctx_in, &l_ctx_out,
+                    lport->tracked_type == TRACKED_RESOURCE_REMOVED)) {
                 return false;
             }
         }
@@ -5075,6 +5094,7 @@ main(int argc, char *argv[])
     ENGINE_NODE_WITH_CLEAR_TRACK_DATA(lb_data, "lb_data");
     ENGINE_NODE(mac_cache, "mac_cache");
     ENGINE_NODE(bfd_chassis, "bfd_chassis");
+    ENGINE_NODE(dns_cache, "dns_cache");
 
 #define SB_NODE(NAME, NAME_STR) ENGINE_NODE_SB(NAME, NAME_STR);
     SB_NODES
@@ -5210,7 +5230,7 @@ main(int argc, char *argv[])
      * process all changes. */
     engine_add_input(&en_lflow_output, &en_sb_logical_dp_group,
                      engine_noop_handler);
-    engine_add_input(&en_lflow_output, &en_sb_dns, NULL);
+
     engine_add_input(&en_lflow_output, &en_lb_data,
                      lflow_output_lb_data_handler);
     engine_add_input(&en_lflow_output, &en_sb_fdb,
@@ -5269,6 +5289,11 @@ main(int argc, char *argv[])
     engine_add_input(&en_mac_cache, &en_sb_port_binding,
                      engine_noop_handler);
 
+    engine_add_input(&en_dns_cache, &en_sb_dns,
+                     dns_cache_sb_dns_handler);
+
+    engine_add_input(&en_controller_output, &en_dns_cache,
+                     NULL);
     engine_add_input(&en_controller_output, &en_lflow_output,
                      controller_output_lflow_output_handler);
     engine_add_input(&en_controller_output, &en_pflow_output,
@@ -5395,9 +5420,17 @@ main(int argc, char *argv[])
                              debug_dump_lflow_conj_ids,
                              &lflow_output_data->conj_ids);
 
+    unixctl_command_register("debug/dump-peer-ports", "", 0, 0,
+                             debug_dump_peer_ports,
+                             &runtime_data->local_datapaths);
+
     unixctl_command_register("debug/dump-local-template-vars", "", 0, 0,
                              debug_dump_local_template_vars,
                              &template_vars_data->local_templates);
+
+    unixctl_command_register("debug/dump-mac-bindings", "", 0, 0,
+                             debug_dump_local_mac_bindings,
+                             &mac_cache_data->mac_bindings);
 
     unixctl_command_register("debug/ignore-startup-delay", "", 0, 0,
                              debug_ignore_startup_delay, NULL);
@@ -5709,7 +5742,6 @@ main(int argc, char *argv[])
                                     sbrec_igmp_group,
                                     sbrec_ip_multicast,
                                     sbrec_fdb_by_dp_key_mac,
-                                    sbrec_dns_table_get(ovnsb_idl_loop.idl),
                                     sbrec_controller_event_table_get(
                                         ovnsb_idl_loop.idl),
                                     sbrec_service_monitor_table_get(
@@ -6336,6 +6368,16 @@ debug_dump_related_lports(struct unixctl_conn *conn, int argc OVS_UNUSED,
 }
 
 static void
+debug_dump_peer_ports(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                          const char *argv[] OVS_UNUSED, void *local_datapaths)
+{
+    struct ds peer_ports = DS_EMPTY_INITIALIZER;
+    local_data_dump_peer_ports(local_datapaths, &peer_ports);
+    unixctl_command_reply(conn, ds_cstr(&peer_ports));
+    ds_destroy(&peer_ports);
+}
+
+static void
 debug_dump_lflow_conj_ids(struct unixctl_conn *conn, int argc OVS_UNUSED,
                           const char *argv[] OVS_UNUSED, void *conj_ids)
 {
@@ -6354,6 +6396,19 @@ debug_dump_local_template_vars(struct unixctl_conn *conn, int argc OVS_UNUSED,
     local_templates_to_string(local_vars, &tv_str);
     unixctl_command_reply(conn, ds_cstr(&tv_str));
     ds_destroy(&tv_str);
+}
+
+static void
+debug_dump_local_mac_bindings(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                               const char *argv[] OVS_UNUSED,
+                               void *mac_bindings)
+{
+    struct ds mb_str = DS_EMPTY_INITIALIZER;
+
+    ds_put_cstr(&mb_str, "Local MAC bindings:\n");
+    mac_bindings_to_string(mac_bindings, &mb_str);
+    unixctl_command_reply(conn, ds_cstr(&mb_str));
+    ds_destroy(&mb_str);
 }
 
 static void

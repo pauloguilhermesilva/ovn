@@ -208,7 +208,11 @@ add_local_datapath_peer_port(
     struct hmap *tracked_datapaths)
 {
     const struct sbrec_port_binding *peer;
-    peer = lport_get_peer(pb, sbrec_port_binding_by_name);
+     if (!strcmp(pb->type, "l3gateway")) {
+        peer = lport_get_l3gw_peer(pb, sbrec_port_binding_by_name);
+    } else {
+        peer = lport_get_peer(pb, sbrec_port_binding_by_name);
+    }
 
     if (!peer) {
         return;
@@ -229,6 +233,21 @@ add_local_datapath_peer_port(
     }
 
     local_datapath_peer_port_add(peer_ld, peer, pb);
+}
+
+void
+local_data_dump_peer_ports(struct hmap *local_datapaths, struct ds *peer_ports)
+{
+    struct local_datapath *ld;
+    HMAP_FOR_EACH (ld, hmap_node, local_datapaths) {
+        const char *name = smap_get_def(&ld->datapath->external_ids, "name",
+                                        "unknown");
+        for (size_t i = 0; i < ld->n_peer_ports; i++) {
+            ds_put_format(peer_ports, "dp %s : local = %s, remote = %s\n",
+                          name, ld->peer_ports[i].local->logical_port,
+                          ld->peer_ports[i].remote->logical_port);
+        }
+    }
 }
 
 void
@@ -359,15 +378,37 @@ tracked_datapath_lport_add(const struct sbrec_port_binding *pb,
     }
 
     /* Check if the lport is already present or not.
-     * If it is already present, then just update the 'pb' field. */
+     * If it is already present, then check whether it is the same pb.
+     * We might have two different pb with the same logical_port if it was
+     * deleted and added back within the same loop.
+     * If the same pb was already present, just update the 'pb' field.
+     * Otherwise, add the second pb */
     struct tracked_lport *lport =
         shash_find_data(&tracked_dp->lports, pb->logical_port);
 
     if (!lport) {
         lport = xmalloc(sizeof *lport);
         shash_add(&tracked_dp->lports, pb->logical_port, lport);
+    } else if (pb != lport->pb) {
+        bool found = false;
+        /* There is at least another pb with the same logical_port.
+         * However, our pb might already be shash_added (e.g. pb1 deleted, pb2
+         * added, pb2 deleted). This is not really optimal, but this loop
+         * only runs in a very uncommon race condition (same logical port
+         * deleted and added within same loop */
+        struct shash_node *node;
+        SHASH_FOR_EACH (node, &tracked_dp->lports) {
+            lport = (struct tracked_lport *) node->data;
+            if (lport->pb == pb) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            lport = xmalloc(sizeof *lport);
+            shash_add(&tracked_dp->lports, pb->logical_port, lport);
+        }
     }
-
     lport->pb = pb;
     lport->tracked_type = tracked_type;
 }
