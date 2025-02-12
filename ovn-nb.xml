@@ -3915,9 +3915,9 @@ or
            This allows to filter CIDR prefixes in the process of advertising
            routes in <code>ovn-ic</code> daemon.
          </p>
-       </column>
+      </column>
 
-       <column name="options" key="ic-route-filter-learn">
+      <column name="options" key="ic-route-filter-learn">
          <p>
            This option expects list of CIDRs delimited by "," that's present
            in the Logical Router Port. A route will be learned if the
@@ -3926,7 +3926,7 @@ or
            This allows to filter CIDR prefixes in the process of learning
            routes in <code>ovn-ic</code> daemon.
          </p>
-       </column>
+      </column>
        
       <column name="options" key="requested-chassis">
         <p>
