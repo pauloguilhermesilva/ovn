@@ -2409,6 +2409,9 @@ or
         has multiple distributed gateway ports(DGP). Otherwise, the outbound
         traffic may be dropped in scenarios where we have different chassis
         for each DGP. This option is set to <code>false</code> by default.
+        With the <code>use_stateless_nat</code>enabled,
+        <code>selection_fields</code> must to be configured different of
+        <code>dp_hash</code>.
       </column>
     </group>
   </table>

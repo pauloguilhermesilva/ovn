@@ -1731,8 +1731,13 @@ check multinode_nbctl lb-add lb0 "172.16.0.100:80" "10.0.1.3:80,10.0.1.4:80"
 check multinode_nbctl lr-lb-add lr0 lb0
 check multinode_nbctl ls-lb-add sw0 lb0
 
+# adjust selection_fields
+check multinode_nbctl set load_balancer lb0 selection_fields="ip_src,tp_src"
+
 # Set use_stateless_nat to true
 check multinode_nbctl set load_balancer lb0 options:use_stateless_nat=true
+
+check multinode_nbctl --wait=sb sync
 
 # Start backend http services
 M_NS_DAEMONIZE([ovn-chassis-1], [sw0p1], [python3 -m http.server --bind 10.0.1.3 80 >/dev/null 2>&1], [http1.pid])
@@ -2066,6 +2071,9 @@ check multinode_nbctl lb-add lb0 "172.16.0.100:9000" "10.0.1.3:80,10.0.1.4:80"
 check multinode_nbctl lr-lb-add lr0 lb0
 check multinode_nbctl ls-lb-add sw0 lb0
 
+# adjust selection_fields
+check multinode_nbctl set load_balancer lb0 selection_fields="ip_src,tp_src"
+
 # Set use_stateless_nat to true
 check multinode_nbctl set load_balancer lb0 options:use_stateless_nat=true
 
@@ -2337,6 +2345,9 @@ check multinode_nbctl lb-add lb0 "172.16.0.100:80" "10.0.2.3:80,10.0.2.4:80"
 check multinode_nbctl lr-lb-add lr0 lb0
 check multinode_nbctl ls-lb-add sw0 lb0
 
+# adjust selection_fields
+check multinode_nbctl set load_balancer lb0 selection_fields="ip_src,tp_src"
+
 check multinode_nbctl --wait=sb sync
 
 # Flush conntrack entries for easier output parsing of next test.
@@ -2449,6 +2460,8 @@ fi
 # Set use_stateless_nat to true
 # Now, if the traffic passes through both gateways (GW-1 and GW-2) it will be forwarded successfully
 check multinode_nbctl set load_balancer lb0 options:use_stateless_nat=true
+
+check multinode_nbctl --wait=sb sync
 
 # Check the flows again for the LB VIP - always needs to be successful regardless of the datapath (one or two gw chassis)
 M_NS_EXEC([ovn-chassis-3], [sw1p1], [sh -c 'curl -v -O 172.16.0.100:80/download_file --retry 0 --connect-timeout 1 --max-time 1 2>curl.out'])

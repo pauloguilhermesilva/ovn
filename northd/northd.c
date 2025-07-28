@@ -12279,32 +12279,6 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
     size_t new_match_len = ctx->new_match->length;
     size_t undnat_match_len = ctx->undnat_match->length;
 
-    /* (NOTE) dnat_action: Add the first LB backend IP as a destination
-     * action of the lr_in_dnat NAT rule. Including the backend IP is useful
-     * for accepting packets coming from a chassis that does not have
-     * previously established conntrack entries. This means that the actions
-     * (ip4.dst + ct_lb_mark) are executed in addition and ip4.dst is not
-     * useful when traffic passes through the same chassis for ingress/egress
-     * packets. However, the actions are complementary in cases where traffic
-     * enters from one chassis, the ack response comes from another chassis,
-     * and the final ack step of the TCP handshake comes from the first
-     * chassis used. Without using stateless NAT, the connection will not be
-     * established because the return packet followed a path through another
-     * chassis and only ct_lb_mark will not be able to receive the ack and
-     * forward it to the right backend. With using stateless NAT, the packet
-     * will be accepted and forwarded to the same backend that corresponds to
-     * the previous conntrack entry that is in the SYN_SENT state
-     * (created by ct_lb_mark for the first rcv packet in this flow).
-     */
-    if (stateless_nat) {
-        if (!vector_is_empty(&ctx->lb_vip->backends)) {
-            const struct ovn_lb_backend *backend =
-                vector_get_ptr(&ctx->lb_vip->backends, 0);
-            bool ipv6 = !IN6_IS_ADDR_V4MAPPED(&backend->ip);
-            ds_put_format(&dnat_action, "%s.dst = %s; ", ipv6 ? "ip6" : "ip4",
-                          backend->ip_str);
-        }
-    }
     ds_put_format(&dnat_action, "%s", ctx->new_action[type]);
 
     const char *meter = NULL;
