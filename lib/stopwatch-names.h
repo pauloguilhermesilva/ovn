@@ -27,4 +27,7 @@
 #define LFLOWS_DP_GROUPS_STOPWATCH_NAME "lflows_dp_groups"
 #define LFLOWS_TO_SB_STOPWATCH_NAME "lflows_to_sb"
 
+#define OVN_IC_LOOP_STOPWATCH_NAME "ovn-ic-loop"
+#define IC_OVN_DB_RUN_STOPWATCH_NAME "ovn_db_run"
+
 #endif
