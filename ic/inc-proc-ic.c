@@ -27,6 +27,7 @@
 #include "openvswitch/vlog.h"
 #include "inc-proc-ic.h"
 #include "en-ic.h"
+#include "en-enum-datapaths.h"
 #include "unixctl.h"
 #include "util.h"
 
@@ -159,6 +160,7 @@ VLOG_DEFINE_THIS_MODULE(inc_proc_ic);
 /* Define engine nodes for other nodes. They should be defined as static to
  * avoid sparse errors. */
 static ENGINE_NODE(ic, SB_WRITE);
+static ENGINE_NODE(enum_datapaths);
 
 void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
                       struct ovsdb_idl_loop *sb,
@@ -167,6 +169,10 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
 {
     /* Define relationships between nodes where first argument is dependent
      * on the second argument */
+    engine_add_input(&en_enum_datapaths, &en_icnb_transit_switch, NULL);
+    engine_add_input(&en_enum_datapaths, &en_icsb_datapath_binding, NULL);
+
+    engine_add_input(&en_ic, &en_enum_datapaths, NULL);
     engine_add_input(&en_ic, &en_nb_nb_global, NULL);
     engine_add_input(&en_ic, &en_nb_logical_router_static_route, NULL);
     engine_add_input(&en_ic, &en_nb_logical_router, NULL);
@@ -221,6 +227,12 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
     struct ovsdb_idl_index *sbrec_port_binding_by_name
         = ovsdb_idl_index_create1(sb->idl,
                                   &sbrec_port_binding_col_logical_port);
+    struct ovsdb_idl_index *sbrec_datapath_binding_by_nb_uuid
+        = ovsdb_idl_index_create1(sb->idl,
+                                  &sbrec_datapath_binding_col_nb_uuid);
+    struct ovsdb_idl_index *sbrec_learned_route_by_datapath
+        = ovsdb_idl_index_create1(sb->idl,
+                                  &sbrec_learned_route_col_datapath);
     struct ovsdb_idl_index *sbrec_service_monitor_by_remote_type
         = ovsdb_idl_index_create1(sb->idl,
                                   &sbrec_service_monitor_col_remote);
@@ -283,6 +295,12 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
     engine_ovsdb_node_add_index(&en_sb_chassis,
                                 "sbrec_chassis_by_name",
                                 sbrec_chassis_by_name);
+    engine_ovsdb_node_add_index(&en_sb_datapath_binding,
+                                "sbrec_datapath_binding_by_nb_uuid",
+                                sbrec_datapath_binding_by_nb_uuid);
+    engine_ovsdb_node_add_index(&en_sb_learned_route,
+                                "sbrec_learned_route_by_datapath",
+                                sbrec_learned_route_by_datapath);
     engine_ovsdb_node_add_index(&en_sb_port_binding,
                                 "sbrec_port_binding_by_name",
                                 sbrec_port_binding_by_name);

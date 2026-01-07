@@ -24,6 +24,7 @@
 #include "command-line.h"
 #include "daemon.h"
 #include "dirs.h"
+#include "inc-proc-eng.h"
 #include "openvswitch/dynamic-string.h"
 #include "fatal-signal.h"
 #include "hash.h"
@@ -35,6 +36,8 @@
 #include "lib/ovn-util.h"
 #include "memory.h"
 #include "openvswitch/poll-loop.h"
+#include "openvswitch/shash.h"
+#include "ovsdb-idl-provider.h"
 #include "ovsdb-idl.h"
 #include "simap.h"
 #include "smap.h"
@@ -172,16 +175,6 @@ allocate_dp_key(struct hmap *dp_tnlids, bool vxlan_mode, const char *name)
             &hint);
 }
 
-static enum ic_datapath_type
-ic_dp_get_type(const struct icsbrec_datapath_binding *isb_dp)
-{
-    if (isb_dp->type && !strcmp(isb_dp->type, "transit-router")) {
-        return IC_ROUTER;
-    }
-
-    return IC_SWITCH;
-}
-
 static enum ic_port_binding_type
 ic_pb_get_type(const struct icsbrec_port_binding *isb_pb)
 {
@@ -193,36 +186,16 @@ ic_pb_get_type(const struct icsbrec_port_binding *isb_pb)
 }
 
 static void
-enumerate_datapaths(struct ic_input *ic,
-                    struct hmap *dp_tnlids,
-                    struct shash *isb_ts_dps,
-                    struct shash *isb_tr_dps)
-{
-    const struct icsbrec_datapath_binding *isb_dp;
-    ICSBREC_DATAPATH_BINDING_TABLE_FOR_EACH (isb_dp,
-        ic->icsbrec_datapath_binding_table) {
-        ovn_add_tnlid(dp_tnlids, isb_dp->tunnel_key);
-
-        enum ic_datapath_type dp_type = ic_dp_get_type(isb_dp);
-        if (dp_type == IC_ROUTER) {
-            char *uuid_str = uuid_to_string(isb_dp->nb_ic_uuid);
-            shash_add(isb_tr_dps, uuid_str, isb_dp);
-            free(uuid_str);
-        } else {
-            shash_add(isb_ts_dps, isb_dp->transit_switch, isb_dp);
-        }
-    }
-}
-
-static void
 ts_run(struct engine_context *ctx,
        struct ic_input *ic,
        struct hmap *dp_tnlids,
-       struct shash *isb_ts_dps)
+       const struct shash *isb_ts_dps)
 {
     const struct icnbrec_transit_switch *ts;
     bool dp_key_refresh = false;
     bool vxlan_mode = false;
+    struct shash used_ts_dps;
+    shash_init(&used_ts_dps);
     const struct icnbrec_ic_nb_global *ic_nb =
         icnbrec_ic_nb_global_table_first(ic->icnbrec_ic_nb_global_table);
 
@@ -308,7 +281,12 @@ ts_run(struct engine_context *ctx,
         ICNBREC_TRANSIT_SWITCH_TABLE_FOR_EACH (ts,
             ic->icnbrec_transit_switch_table) {
             const struct icsbrec_datapath_binding *isb_dp =
-                shash_find_and_delete(isb_ts_dps, ts->name);
+                shash_find_data(isb_ts_dps, ts->name);
+
+            if (isb_dp) {
+                shash_add(&used_ts_dps, isb_dp->transit_switch, isb_dp);
+            }
+
             if (!isb_dp) {
                 /* Allocate tunnel key */
                 int64_t dp_key = allocate_dp_key(dp_tnlids, vxlan_mode,
@@ -320,6 +298,10 @@ ts_run(struct engine_context *ctx,
                 isb_dp = icsbrec_datapath_binding_insert(ctx->ovnisb_idl_txn);
                 icsbrec_datapath_binding_set_transit_switch(isb_dp, ts->name);
                 icsbrec_datapath_binding_set_tunnel_key(isb_dp, dp_key);
+                icsbrec_datapath_binding_set_nb_ic_uuid(isb_dp,
+                                                        &ts->header_.uuid, 1);
+                icsbrec_datapath_binding_set_type(isb_dp, "transit-switch");
+                shash_add(&used_ts_dps, isb_dp->transit_switch, isb_dp);
             } else if (dp_key_refresh) {
                 /* Refresh tunnel key since encap mode has changed. */
                 int64_t dp_key = allocate_dp_key(dp_tnlids, vxlan_mode,
@@ -339,9 +321,15 @@ ts_run(struct engine_context *ctx,
             }
         }
 
-        struct shash_node *node;
-        SHASH_FOR_EACH (node, isb_ts_dps) {
-            icsbrec_datapath_binding_delete(node->data);
+        struct shash_node *node, *next;
+        SHASH_FOR_EACH_SAFE (node, next, isb_ts_dps) {
+            struct icsbrec_datapath_binding *isb_dp_to_del = node->data;
+            struct icsbrec_datapath_binding *used_dp =
+                shash_find_data(&used_ts_dps, isb_dp_to_del->transit_switch);
+            if (isb_dp_to_del->n_nb_ic_uuid > 0 &&
+                !used_dp) {
+                icsbrec_datapath_binding_delete(isb_dp_to_del);
+            }
         }
     }
 }
@@ -350,9 +338,11 @@ static void
 tr_run(struct engine_context *ctx,
        struct ic_input *ic,
        struct hmap *dp_tnlids,
-       struct shash *isb_tr_dps)
+       const struct shash *isb_tr_dps)
 {
     const struct nbrec_logical_router *lr;
+    struct shash used_tr_dps;
+    shash_init(&used_tr_dps);
 
     if (ctx->ovnnb_idl_txn) {
         struct shash nb_tres = SHASH_INITIALIZER(&nb_tres);
@@ -404,7 +394,7 @@ tr_run(struct engine_context *ctx,
             ic->icnbrec_transit_router_table) {
             char *uuid_str = uuid_to_string(&tr->header_.uuid);
             struct icsbrec_datapath_binding *isb_dp =
-                shash_find_and_delete(isb_tr_dps, uuid_str);
+                shash_find_data(isb_tr_dps, uuid_str);
             free(uuid_str);
 
             if (!isb_dp) {
@@ -419,12 +409,25 @@ tr_run(struct engine_context *ctx,
                 icsbrec_datapath_binding_set_nb_ic_uuid(isb_dp,
                                                         &tr->header_.uuid, 1);
                 icsbrec_datapath_binding_set_type(isb_dp, "transit-router");
+                char *uuid = uuid_to_string(&tr->header_.uuid);
+                shash_add(&used_tr_dps, uuid, isb_dp);
+                free(uuid);
+            } else {
+                char *uuid = uuid_to_string(&tr->header_.uuid);
+                shash_add(&used_tr_dps, uuid, isb_dp);
+                free(uuid);
             }
         }
 
         struct shash_node *node;
         SHASH_FOR_EACH (node, isb_tr_dps) {
-            icsbrec_datapath_binding_delete(node->data);
+            struct icsbrec_datapath_binding *dp = node->data;
+            char *uuid = uuid_to_string(dp->nb_ic_uuid);
+            struct icsbrec_datapath_binding *used_dp =
+                shash_find_data(&used_tr_dps, uuid);
+            if (!used_dp) {
+                icsbrec_datapath_binding_delete(node->data);
+            }
         }
     }
 }
@@ -1596,7 +1599,7 @@ add_to_routes_ad(struct hmap *routes_ad, const struct in6_addr prefix,
     uint hash = ic_route_hash(&prefix, plen, &nexthop, origin,
                               route_table, NULL);
 
-    if (!ic_route_find(routes_ad, &prefix, plen, &nexthop, origin,
+    if (!ic_route_find(routes_ad, &prefix, plen, &nexthop, origin, route_table,
                        NULL, hash)) {
         struct ic_route_info *ic_route = xzalloc(sizeof *ic_route);
         ic_route->prefix = prefix;
@@ -1910,7 +1913,7 @@ route_matches_local_lb(const struct nbrec_load_balancer *nb_lb,
 }
 
 static bool
-route_need_learn(struct ic_context *ctx,
+route_need_learn(struct ic_input *ic,
                  const struct nbrec_logical_router *lr,
                  const struct icsbrec_route *isb_route,
                  struct in6_addr *prefix, unsigned int plen,
@@ -1982,7 +1985,7 @@ route_need_learn(struct ic_context *ctx,
     }
 
     const struct sbrec_datapath_binding *dp =
-        find_sb_dp_by_nb_uuid(ctx->sbrec_datapath_binding_by_nb_uuid,
+        find_sb_dp_by_nb_uuid(ic->sbrec_datapath_binding_by_nb_uuid,
                               &lr->header_.uuid);
     if (!dp) {
         return true;
@@ -1990,11 +1993,11 @@ route_need_learn(struct ic_context *ctx,
 
 
     struct sbrec_learned_route *filter = sbrec_learned_route_index_init_row(
-        ctx->sbrec_learned_route_by_datapath);
+        ic->sbrec_learned_route_by_datapath);
     sbrec_learned_route_index_set_datapath(filter, dp);
     struct sbrec_learned_route *sb_route;
     SBREC_LEARNED_ROUTE_FOR_EACH_EQUAL (sb_route, filter,
-                                        ctx->sbrec_learned_route_by_datapath) {
+                                        ic->sbrec_learned_route_by_datapath) {
         if (!strcmp(isb_route->ip_prefix, sb_route->ip_prefix)) {
             sbrec_learned_route_index_destroy_row(filter);
                 VLOG_DBG("Skip learning %s (rtb:%s) route, as we've got"
@@ -2179,7 +2182,7 @@ sync_learned_routes(struct engine_context *ctx,
                              isb_route->nexthop);
                 continue;
             }
-            if (!route_need_learn(ctx, ic_lr->lr, isb_route, &prefix, plen,
+            if (!route_need_learn(ic, ic_lr->lr, isb_route, &prefix, plen,
                                   &nb_global->options, lrp, &nexthop)) {
                 continue;
             }
@@ -2437,18 +2440,18 @@ build_ts_routes_to_adv(struct ic_input *ic,
     }
 
     const struct sbrec_datapath_binding *dp =
-        find_sb_dp_by_nb_uuid(ctx->sbrec_datapath_binding_by_nb_uuid,
+        find_sb_dp_by_nb_uuid(ic->sbrec_datapath_binding_by_nb_uuid,
                               &lr->header_.uuid);
     if (!dp) {
         return;
     }
 
     struct sbrec_learned_route *filter = sbrec_learned_route_index_init_row(
-        ctx->sbrec_learned_route_by_datapath);
+        ic->sbrec_learned_route_by_datapath);
     sbrec_learned_route_index_set_datapath(filter, dp);
     struct sbrec_learned_route *sb_route;
     SBREC_LEARNED_ROUTE_FOR_EACH_EQUAL (sb_route, filter,
-                                        ctx->sbrec_learned_route_by_datapath) {
+                                        ic->sbrec_learned_route_by_datapath) {
         add_network_to_routes_ad(routes_ad, sb_route->ip_prefix, NULL,
                                  ts_port_addrs,
                                  &nb_global->options,
@@ -2553,7 +2556,7 @@ static void
 route_run(struct engine_context *ctx,
           struct ic_input *ic)
 {
-    if (!ctx->ovnisb_txn || !ctx->ovnnb_txn || !ctx->ovnsb_txn) {
+    if (!ctx->ovnisb_idl_txn || !ctx->ovnnb_idl_txn || !ctx->ovnsb_idl_txn) {
         return;
     }
 
@@ -3195,10 +3198,8 @@ ovn_db_run(struct ic_input *input_data,
            struct engine_context *eng_ctx)
 {
     gateway_run(eng_ctx, input_data);
-    enumerate_datapaths(input_data, &ic_data->dp_tnlids,
-                        &ic_data->isb_ts_dps, &ic_data->isb_tr_dps);
-    ts_run(eng_ctx, input_data, &ic_data->dp_tnlids, &ic_data->isb_ts_dps);
-    tr_run(eng_ctx, input_data, &ic_data->dp_tnlids, &ic_data->isb_tr_dps);
+    ts_run(eng_ctx, input_data, ic_data->dp_tnlids, ic_data->isb_ts_dps);
+    tr_run(eng_ctx, input_data, ic_data->dp_tnlids, ic_data->isb_tr_dps);
     port_binding_run(eng_ctx, input_data);
     route_run(eng_ctx, input_data);
     sync_service_monitor(eng_ctx, input_data);
@@ -3598,12 +3599,6 @@ main(int argc, char *argv[])
                                &sbrec_learned_route_col_ip_prefix);
     ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
                                &sbrec_learned_route_col_datapath);
-    struct ovsdb_idl_index *sbrec_datapath_binding_by_nb_uuid
-        = ovsdb_idl_index_create1(ovnsb_idl_loop.idl,
-                                  &sbrec_datapath_binding_col_nb_uuid);
-    struct ovsdb_idl_index *sbrec_learned_route_by_datapath
-        = ovsdb_idl_index_create1(ovnsb_idl_loop.idl,
-                                  &sbrec_learned_route_col_datapath);
 
     unixctl_command_register("nb-connection-status", "", 0, 0,
                              ovn_conn_show, ovnnb_idl_loop.idl);
@@ -3616,6 +3611,7 @@ main(int argc, char *argv[])
 
     stopwatch_create(OVN_IC_LOOP_STOPWATCH_NAME, SW_MS);
     stopwatch_create(IC_OVN_DB_RUN_STOPWATCH_NAME, SW_MS);
+    stopwatch_create(OVN_IC_ENUM_DATAPATHS_RUN_STOPWATCH_NAME, SW_MS);
 
     /* Initialize incremental processing engine for ovn-northd */
     inc_proc_ic_init(&ovnnb_idl_loop, &ovnsb_idl_loop,
@@ -3711,10 +3707,6 @@ main(int argc, char *argv[])
             }
 
             if (!state.had_lock && ovsdb_idl_has_lock(ovnsb_idl_loop.idl)) {
-                .sbrec_datapath_binding_by_nb_uuid =
-                    sbrec_datapath_binding_by_nb_uuid,
-                .sbrec_learned_route_by_datapath =
-                  sbrec_learned_route_by_datapath,
                 VLOG_INFO("ovn-ic lock acquired. "
                             "This ovn-ic instance is now active.");
                 state.had_lock = true;

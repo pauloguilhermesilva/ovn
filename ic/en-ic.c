@@ -24,6 +24,8 @@
 /* OVN includes. */
 #include "ovn-ic.h"
 #include "en-ic.h"
+#include "en-enum-datapaths.h"
+#include "lib/ovn-ic-sb-idl.h"
 #include "lib/inc-proc-eng.h"
 #include "lib/ovn-util.h"
 #include "lib/stopwatch-names.h"
@@ -146,24 +148,36 @@ ic_get_input_data(struct engine_node *node,
         engine_ovsdb_node_get_index(
             engine_get_input("ICSB_service_monitor", node),
             "icsbrec_service_monitor_by_target_az_logical_port");
+    input_data->sbrec_datapath_binding_by_nb_uuid =
+        engine_ovsdb_node_get_index(
+            engine_get_input("SB_datapath_binding", node),
+            "sbrec_datapath_binding_by_nb_uuid");
+    input_data->sbrec_learned_route_by_datapath =
+        engine_ovsdb_node_get_index(
+            engine_get_input("SB_learned_route", node),
+            "sbrec_learned_route_by_datapath");
 }
 
 enum engine_node_state
 en_ic_run(struct engine_node *node, void *data)
 {
     const struct engine_context *eng_ctx = engine_get_context();
-
+    struct ic_data *ic_data = data;
     struct ic_input input_data;
 
-    ic_destroy(data);
-    ic_init(data);
+    struct ed_type_enum_datapaths *dp_node_data =
+        engine_get_input_data("enum_datapaths", node);
+
+    ic_data->dp_tnlids = &dp_node_data->dp_tnlids;
+    ic_data->isb_ts_dps = &dp_node_data->isb_ts_dps;
+    ic_data->isb_tr_dps = &dp_node_data->isb_tr_dps;
 
     ic_get_input_data(node, &input_data);
     input_data.runned_az = eng_ctx->client_ctx;
 
     COVERAGE_INC(ic_run);
     stopwatch_start(IC_OVN_DB_RUN_STOPWATCH_NAME, time_msec());
-    ovn_db_run(&input_data, data, (struct engine_context *) eng_ctx);
+    ovn_db_run(&input_data, ic_data, (struct engine_context *) eng_ctx);
     stopwatch_stop(IC_OVN_DB_RUN_STOPWATCH_NAME, time_msec());
     return EN_UPDATED;
 }
@@ -186,17 +200,14 @@ en_ic_cleanup(void *data)
 }
 
 void
-ic_destroy(struct ic_data *data)
+ic_destroy(struct ic_data *data OVS_UNUSED)
 {
-    ovn_destroy_tnlids(&data->dp_tnlids);
-    shash_destroy(&data->isb_ts_dps);
-    shash_destroy(&data->isb_tr_dps);
 }
 
 void
 ic_init(struct ic_data *data)
 {
-    hmap_init(&data->dp_tnlids);
-    shash_init(&data->isb_ts_dps);
-    shash_init(&data->isb_tr_dps);
+    data->dp_tnlids = NULL;
+    data->isb_ts_dps = NULL;
+    data->isb_tr_dps = NULL;
 }

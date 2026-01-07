@@ -68,10 +68,10 @@ struct ic_input {
 };
 
 struct ic_data {
-    /* Global state for 'en-ic'. */
-    struct hmap dp_tnlids;
-    struct shash isb_ts_dps;
-    struct shash isb_tr_dps;
+    /* Global state for 'en-enum-datapaths'. */
+    struct hmap *dp_tnlids;
+    const struct shash *isb_ts_dps;
+    const struct shash *isb_tr_dps;
 };
 struct ic_state {
     bool had_lock;
