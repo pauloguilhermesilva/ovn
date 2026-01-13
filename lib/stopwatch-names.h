@@ -28,7 +28,6 @@
 #define LFLOWS_TO_SB_STOPWATCH_NAME "lflows_to_sb"
 
 #define OVN_IC_LOOP_STOPWATCH_NAME "ovn-ic-loop"
-#define IC_OVN_DB_RUN_STOPWATCH_NAME "ovn_db_run"
 #define OVN_IC_GATEWAY_RUN_STOPWATCH_NAME "gateway_run"
 #define OVN_IC_ENUM_DATAPATHS_RUN_STOPWATCH_NAME "enum_datapaths_run"
 #define OVN_IC_TRANSIT_SWITCH_RUN_STOPWATCH_NAME "transit_switch_run"
