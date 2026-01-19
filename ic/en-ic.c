@@ -82,30 +82,6 @@ ic_get_input_data(struct engine_node *node,
         engine_ovsdb_node_get_index(
             engine_get_input("SB_port_binding", node),
             "sbrec_port_binding_by_name");
-    input_data->sbrec_service_monitor_by_remote_type =
-        engine_ovsdb_node_get_index(
-            engine_get_input("SB_service_monitor", node),
-            "sbrec_service_monitor_by_remote_type");
-    input_data->sbrec_service_monitor_by_ic_learned =
-        engine_ovsdb_node_get_index(
-            engine_get_input("SB_service_monitor", node),
-            "sbrec_service_monitor_by_ic_learned");
-    input_data->sbrec_service_monitor_by_remote_type_logical_port =
-        engine_ovsdb_node_get_index(
-            engine_get_input("SB_service_monitor", node),
-            "sbrec_service_monitor_by_remote_type_logical_port");
-    input_data->icsbrec_service_monitor_by_source_az =
-        engine_ovsdb_node_get_index(
-            engine_get_input("ICSB_service_monitor", node),
-            "icsbrec_service_monitor_by_source_az");
-    input_data->icsbrec_service_monitor_by_target_az =
-        engine_ovsdb_node_get_index(
-            engine_get_input("ICSB_service_monitor", node),
-            "icsbrec_service_monitor_by_target_az");
-    input_data->icsbrec_service_monitor_by_target_az_logical_port =
-        engine_ovsdb_node_get_index(
-            engine_get_input("ICSB_service_monitor", node),
-            "icsbrec_service_monitor_by_target_az_logical_port");
     input_data->sbrec_datapath_binding_by_nb_uuid =
         engine_ovsdb_node_get_index(
             engine_get_input("SB_datapath_binding", node),

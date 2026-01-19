@@ -33,6 +33,7 @@
 #include "en-tr.h"
 #include "en-port-binding.h"
 #include "en-route.h"
+#include "en-srv-mon.h"
 #include "unixctl.h"
 #include "util.h"
 
@@ -171,6 +172,7 @@ static ENGINE_NODE(tr);
 static ENGINE_NODE(ts, SB_WRITE);
 static ENGINE_NODE(port_binding, SB_WRITE);
 static ENGINE_NODE(route, SB_WRITE);
+static ENGINE_NODE(srv_mon, SB_WRITE);
 
 void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
                       struct ovsdb_idl_loop *sb,
@@ -216,12 +218,20 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_route, &en_sb_learned_route, NULL);
     engine_add_input(&en_route, &en_nb_logical_router_static_route, NULL);
 
+    engine_add_input(&en_srv_mon, &en_icsb_service_monitor, NULL);
+    engine_add_input(&en_srv_mon, &en_sb_sb_global, NULL);
+    engine_add_input(&en_srv_mon, &en_sb_service_monitor, NULL);
+    engine_add_input(&en_srv_mon, &en_nb_load_balancer, NULL);
+    engine_add_input(&en_srv_mon, &en_nb_load_balancer_group, NULL);
+    engine_add_input(&en_srv_mon, &en_sb_port_binding, NULL);
+
     engine_add_input(&en_ic, &en_gateway, NULL);
     engine_add_input(&en_ic, &en_enum_datapaths, NULL);
     engine_add_input(&en_ic, &en_ts, NULL);
     engine_add_input(&en_ic, &en_tr, NULL);
     engine_add_input(&en_ic, &en_port_binding, NULL);
     engine_add_input(&en_ic, &en_route, NULL);
+    engine_add_input(&en_ic, &en_srv_mon, NULL);
 
     engine_add_input(&en_ic, &en_nb_logical_router, NULL);
     engine_add_input(&en_ic, &en_nb_logical_router_port, NULL);

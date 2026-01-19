@@ -48,13 +48,6 @@ struct ic_input {
     struct ovsdb_idl_index *sbrec_datapath_binding_by_nb_uuid;
     struct ovsdb_idl_index *sbrec_learned_route_by_datapath;
     struct ovsdb_idl_index *sbrec_port_binding_by_name;
-    struct ovsdb_idl_index *sbrec_service_monitor_by_remote_type;
-    struct ovsdb_idl_index *sbrec_service_monitor_by_ic_learned;
-    struct ovsdb_idl_index *sbrec_service_monitor_by_remote_type_logical_port;
-    struct ovsdb_idl_index *icnbrec_transit_switch_by_name;
-    struct ovsdb_idl_index *icsbrec_service_monitor_by_source_az;
-    struct ovsdb_idl_index *icsbrec_service_monitor_by_target_az;
-    struct ovsdb_idl_index *icsbrec_service_monitor_by_target_az_logical_port;
 };
 
 struct ic_data {
