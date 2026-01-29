@@ -20,10 +20,14 @@
 
 /* OVS includes. */
 #include "openvswitch/vlog.h"
+#include "openvswitch/util.h"
+#include "openvswitch/shash.h"
+#include "openvswitch/hmap.h"
 
 /* OVN includes. */
 #include "ovn-ic.h"
 #include "en-port-binding.h"
+#include "en-ts.h"
 #include "inc-proc-ic.h"
 #include "lib/inc-proc-eng.h"
 #include "lib/ovn-nb-idl.h"
@@ -114,6 +118,21 @@ static void
 static const struct sbrec_port_binding *
     find_lsp_in_sb(struct pb_input *pb,
                    const struct nbrec_logical_switch_port *lsp);
+static const struct nbrec_logical_switch_port *
+    find_nb_lsp_from_sb_pb(struct pb_input *pb,
+                           const struct sbrec_port_binding *sb_pb);
+struct icsbrec_port_binding *
+    find_isb_pb_by_name(struct pb_input *pb, const char *name);
+static bool is_pb_associated_with_ts(struct pb_input *pb,
+                                     const struct sbrec_port_binding *sb_pb,
+                                     struct icnbrec_transit_switch *ts_key);
+
+/* DEBUG */
+static void log_lsp(const struct nbrec_logical_switch_port *lsp);
+static void log_ls(const struct nbrec_logical_switch *ls);
+static void log_ts(const struct icnbrec_transit_switch *ts);
+static void log_sb_pb(const struct sbrec_port_binding *pb);
+static void log_isb_pb(const struct icsbrec_port_binding *isb_pb);
 
 static void
 port_binding_get_input_data(struct engine_node *node,
@@ -128,10 +147,18 @@ port_binding_get_input_data(struct engine_node *node,
         engine_ovsdb_node_get_index(
             engine_get_input("ICSB_port_binding", node),
             "icsbrec_port_binding_by_ts");
+    input_data->icsbrec_port_binding_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("ICSB_port_binding", node),
+            "icsbrec_port_binding_by_name");
     input_data->nbrec_ls_by_name =
         engine_ovsdb_node_get_index(
             engine_get_input("NB_logical_switch", node),
             "nbrec_ls_by_name");
+    input_data->nbrec_lsp_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("NB_logical_switch_port", node),
+            "nbrec_lsp_by_name");
     input_data->sbrec_port_binding_by_name =
         engine_ovsdb_node_get_index(
             engine_get_input("SB_port_binding", node),
@@ -144,15 +171,25 @@ port_binding_get_input_data(struct engine_node *node,
         engine_ovsdb_node_get_index(
             engine_get_input("NB_logical_router", node),
             "nbrec_lr_by_name");
+    input_data->nbrec_ls_by_lsp_port =
+        engine_ovsdb_node_get_index(
+            engine_get_input("NB_logical_switch", node),
+            "nbrec_ls_by_lsp_port");
     input_data->sbrec_chassis_by_name =
         engine_ovsdb_node_get_index(
             engine_get_input("SB_chassis", node),
             "sbrec_chassis_by_name");
+    input_data->icnbrec_transit_switch_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("ICNB_transit_switch", node),
+            "icnbrec_transit_switch_by_name");
+    
 }
 
 enum engine_node_state
 en_port_binding_run(struct engine_node *node, void *data)
 {
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
     const struct engine_context *eng_ctx = engine_get_context();
     struct ed_type_port_binding *pb_data = data;
     struct pb_input pb_input;
@@ -226,6 +263,9 @@ port_binding_run(const struct engine_context *eng_ctx,
                  const struct icnbrec_transit_switch_table *icnb_ts_table,
                  const struct icnbrec_transit_router_table *icnb_tr_table)
 {
+    VLOG_INFO("DBG-PG -====================== - %s : %s : %d", __FILE__, __func__, __LINE__);
+    VLOG_INFO("DBG-PG - FULL-RECOMPUTE-PB - %s : %s : %d", __FILE__, __func__, __LINE__);
+    VLOG_INFO("DBG-PG -====================== - %s : %s : %d", __FILE__, __func__, __LINE__);
     if (!eng_ctx->ovnisb_idl_txn || !eng_ctx->ovnnb_idl_txn
         || !eng_ctx->ovnsb_idl_txn) {
         return;
@@ -850,4 +890,651 @@ find_lsp_in_sb(struct pb_input *pb,
                const struct nbrec_logical_switch_port *lsp)
 {
     return find_sb_pb_by_name(pb->sbrec_port_binding_by_name, lsp->name);
+}
+
+#if 0
+static const struct nbrec_logical_switch *
+find_ls_from_lsp(struct pb_input *pb,
+                 const struct nbrec_logical_switch_port *lsp)
+{
+    struct nbrec_logical_switch *key =
+        nbrec_logical_switch_index_init_row(pb->nbrec_ls_by_lsp_port);
+    nbrec_logical_switch_index_set_ports(key,
+        (struct nbrec_logical_switch_port **) &lsp, 1);
+    const struct nbrec_logical_switch *ls =
+        nbrec_logical_switch_index_find(pb->nbrec_ls_by_lsp_port, key);
+
+    nbrec_logical_switch_index_destroy_row(key);
+    return ls;
+}
+#endif
+
+#if 1
+static const struct nbrec_logical_switch *
+find_ls_from_lsp(const struct nbrec_logical_switch_table *nb_ls_table,
+                 const struct nbrec_logical_switch_port *lsp)
+{
+    const struct nbrec_logical_switch *ls;
+    // Percorre os switches monitorados pelo IDL
+    NBREC_LOGICAL_SWITCH_FOR_EACH (ls, nb_ls_table) {
+        for (size_t i = 0; i < ls->n_ports; i++) {
+            if (ls->ports[i] == lsp) {
+                return ls; // Encontrou o switch que contém esta porta
+            }
+        }
+    }
+    return NULL;
+}
+#endif
+
+static const struct nbrec_logical_switch_port *
+find_nb_lsp_from_sb_pb(struct pb_input *pb,
+                       const struct sbrec_port_binding *sb_pb)
+{
+    struct nbrec_logical_switch_port *key =
+        nbrec_logical_switch_port_index_init_row(pb->nbrec_lsp_by_name);
+    nbrec_logical_switch_port_index_set_name(key, sb_pb->logical_port);
+    const struct nbrec_logical_switch_port *nb_lsp =
+        nbrec_logical_switch_port_index_find(pb->nbrec_lsp_by_name, key);
+
+    nbrec_logical_switch_port_index_destroy_row(key);
+    return nb_lsp;
+}
+
+struct icsbrec_port_binding *
+find_isb_pb_by_name(struct pb_input *pb, const char *name)
+{
+    struct icsbrec_port_binding *key =
+        icsbrec_port_binding_index_init_row(pb->icsbrec_port_binding_by_name);
+    
+    icsbrec_port_binding_index_set_logical_port(key, name);
+    struct icsbrec_port_binding *isb_pb =
+        icsbrec_port_binding_index_find(pb->icsbrec_port_binding_by_name, key);
+
+    icsbrec_port_binding_index_destroy_row(key);
+
+    return isb_pb;
+}
+
+static bool
+is_pb_associated_with_ts(struct pb_input *pb,
+                         const struct sbrec_port_binding *sb_pb,
+                         struct icnbrec_transit_switch *ts_key)
+{
+    if (!sb_pb->datapath) {
+        return false;
+    }
+
+    const char *ls_name = smap_get(&sb_pb->datapath->external_ids, "name");
+    if (!ls_name) {
+        return false;
+    }
+
+    icnbrec_transit_switch_index_set_name(ts_key, ls_name);
+    
+    if (icnbrec_transit_switch_index_find(pb->icnbrec_transit_switch_by_name, 
+                                          ts_key)) {
+        return true;
+    }
+
+    return false;
+}
+
+static void
+update_or_create_isb_pb(const struct engine_context *eng_ctx,
+                        struct pb_input *pb,
+                        struct ed_type_port_binding *pb_data,
+                        const struct sbrec_port_binding *sb_pb,
+                        const struct nbrec_logical_switch_port *nb_lsp,
+                        const struct icsbrec_port_binding *isb_pb, 
+                        const struct nbrec_logical_switch_table *nb_ls_table)
+{
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    log_lsp(nb_lsp);
+    log_sb_pb(sb_pb);
+    const struct nbrec_logical_switch *ls = find_ls_from_lsp(nb_ls_table, nb_lsp);
+    log_ls(ls);
+    /* The port is remote.*/
+    if (!ls) {
+        return;
+    }
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    const char *ts_name = smap_get(&ls->other_config, "interconn-ts"); //Aqui
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    const struct icnbrec_transit_switch *t_sw, *t_sw_key;
+    t_sw_key = icnbrec_transit_switch_index_init_row(
+            pb->icnbrec_transit_switch_by_name);
+    icnbrec_transit_switch_index_set_name(t_sw_key, ts_name);
+    t_sw = icnbrec_transit_switch_index_find(
+            pb->icnbrec_transit_switch_by_name, t_sw_key);
+    icnbrec_transit_switch_index_destroy_row(t_sw_key);
+    log_ts(t_sw);
+
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    if (!strcmp(nb_lsp->type, "router")
+                || !strcmp(nb_lsp->type, "switch")) {
+        /* The port is local. */
+        VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+        if (!isb_pb) {
+            VLOG_INFO("DBG-PG CREATE ISB-PB- - %s : %s : %d", __FILE__, __func__, __LINE__); /*ISB-PB NEW*/
+            isb_pb = create_isb_pb(eng_ctx, nb_lsp->name, pb->runned_az,
+                                t_sw->name, &t_sw->header_.uuid,
+                                "transit-switch-port", &pb_data->pb_tnlids);
+            sync_ts_isb_pb(pb, sb_pb, isb_pb);
+        } else { /*ISB-PB UPGRADE*/
+            sync_local_port(pb, isb_pb, sb_pb, nb_lsp);
+        }
+#if 0
+    } else if (!strcmp(nb_lsp->type, "remote")) {
+        /* The port is remote. */
+        if (!isb_pb) {
+            nbrec_logical_switch_update_ports_delvalue(ls, nb_lsp);
+        } else {
+            sync_remote_port(pb, isb_pb, nb_lsp, sb_pb);
+        }
+#endif
+    } else {
+        VLOG_INFO("Ignore lsp %s on ts %s with type %s.",
+                 nb_lsp->name, t_sw->name, nb_lsp->type);
+    }
+}
+
+/* Handler functions. */
+enum engine_input_handler_result
+port_binding_en_ts_handler(struct engine_node *node,
+                           void *data)
+{
+    return EN_HANDLED_UPDATED;
+}
+
+/* Handler functions. */
+enum engine_input_handler_result
+port_binding_sb_port_binding_handler(struct engine_node *node,
+                                          void *data)
+{
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct pb_input pb_input;
+    struct ed_type_port_binding *pb_data = data;
+    const struct sbrec_port_binding_table *sb_pb_table =
+        EN_OVSDB_GET(engine_get_input("SB_port_binding", node));
+    const struct nbrec_logical_switch_table *nb_ls_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_switch", node));
+
+    port_binding_get_input_data(node, &pb_input);
+    pb_input.runned_az = eng_ctx->client_ctx;
+
+    const struct sbrec_port_binding *sb_pb;
+
+    struct icnbrec_transit_switch *ts_key =
+        icnbrec_transit_switch_index_init_row(
+            pb_input.icnbrec_transit_switch_by_name);
+
+    SBREC_PORT_BINDING_TABLE_FOR_EACH_TRACKED (sb_pb, sb_pb_table) {
+        VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+        log_sb_pb(sb_pb);
+        if (strcmp(sb_pb->type, "patch") != 0) {
+            continue;
+        }
+        VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);     /* sb_pb relationship with lrp */
+        if (!is_pb_associated_with_ts(&pb_input, sb_pb, ts_key)) {
+            continue;
+        }
+        VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+        const struct nbrec_logical_switch_port *nb_lsp =
+            find_nb_lsp_from_sb_pb(&pb_input, sb_pb);
+        VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+        if (!nb_lsp) {
+            continue;
+        }
+        VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+
+        struct icsbrec_port_binding *isb_key =
+            icsbrec_port_binding_index_init_row(
+                pb_input.icsbrec_port_binding_by_name);
+        icsbrec_port_binding_index_set_logical_port(isb_key,
+                                                    sb_pb->logical_port);
+        const struct icsbrec_port_binding *isb_pb =
+            icsbrec_port_binding_index_find(
+                pb_input.icsbrec_port_binding_by_name, isb_key);
+        icsbrec_port_binding_index_destroy_row(isb_key);
+        VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+        if (sbrec_port_binding_is_deleted(sb_pb)) {
+            VLOG_INFO("DBG-PG - ###### PB-DELETED ###### - %s : %s : %d", __FILE__, __func__, __LINE__);
+            struct icsbrec_port_binding *isb_key1 =
+                icsbrec_port_binding_index_init_row(pb_input.icsbrec_port_binding_by_name);
+            icsbrec_port_binding_index_set_logical_port(isb_key1, sb_pb->logical_port);
+
+            const struct icsbrec_port_binding *isb_pb1 =
+                icsbrec_port_binding_index_find(pb_input.icsbrec_port_binding_by_name, isb_key1);
+
+            icsbrec_port_binding_index_destroy_row(isb_key1);
+            if (isb_pb1) {
+                VLOG_INFO("Deletando porta %s do IC-SB (removida do SB local)", 
+                          sb_pb->logical_port);
+                icsbrec_port_binding_delete(isb_pb1);
+            }
+            continue;
+        } else {
+            VLOG_INFO("DBG-PG ADD|UPDATED - - %s : %s : %d", __FILE__, __func__, __LINE__);
+
+            struct shash_node *node2;
+
+            if (&pb_data->switch_all_local_pbs == NULL) {
+                VLOG_INFO("DBG-PG NULLL - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            }
+
+            /* Supondo que 'my_shash' seja o seu dicionário de strings */
+            SHASH_FOR_EACH (node2, &pb_data->switch_all_local_pbs) {
+                VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+                const char *name = node2->name;    // A chave (string)
+                VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+                const struct icsbrec_port_binding *data1 = node2->data; // O valor (ponteiro)
+
+                VLOG_INFO("KKKKKKK->Porta: %s com tnl_key: %"PRId64, name, data1->tunnel_key);
+            // Faça algo com os dados aqui
+}
+            update_or_create_isb_pb(eng_ctx, &pb_input, pb_data, sb_pb, nb_lsp, isb_pb, nb_ls_table);
+            continue;
+        }
+    }
+    icnbrec_transit_switch_index_destroy_row(ts_key);
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    return EN_HANDLED_UPDATED;
+}
+
+enum engine_input_handler_result
+port_binding_nb_logical_switch_port_handler(struct engine_node *node,
+                                            void *data)
+{
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct ed_type_port_binding *pb_data = data;
+    struct pb_input pb_input;
+
+    const struct nbrec_logical_switch_port_table *nb_lsp_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_switch_port", node));
+
+    port_binding_get_input_data(node, &pb_input);
+    pb_input.runned_az = eng_ctx->client_ctx;
+
+    const struct nbrec_logical_switch_port *nb_lsp;
+    NBREC_LOGICAL_SWITCH_PORT_TABLE_FOR_EACH_TRACKED (nb_lsp, nb_lsp_table) {
+        if (nbrec_logical_switch_port_is_deleted(nb_lsp)) {
+            VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            const char *port_name = nb_lsp->name;
+            if (!port_name) {
+                continue;
+            }
+            struct icsbrec_port_binding *isb_pb =
+                find_isb_pb_by_name(&pb_input, port_name);
+            if (isb_pb) {
+                VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+                icsbrec_port_binding_delete(isb_pb);
+            }
+        } else if (nbrec_logical_switch_port_is_new(nb_lsp)) {
+            VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            log_lsp(nb_lsp);
+        } else {
+            VLOG_INFO("DBG-PG LSP-UPGRADE - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            log_lsp(nb_lsp);
+        }
+    }
+
+    return EN_HANDLED_UPDATED;
+}
+
+enum engine_input_handler_result
+port_binding_icsb_port_binding_handler(struct engine_node *node,
+                                       void *data)
+{
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct ed_type_port_binding *pb_data = data;
+    struct pb_input pb_input;
+
+    const struct icsbrec_port_binding_table *isb_pb_table =
+        EN_OVSDB_GET(engine_get_input("ICSB_port_binding", node));
+
+    port_binding_get_input_data(node, &pb_input);
+    pb_input.runned_az = eng_ctx->client_ctx;
+
+    const struct icsbrec_port_binding *isb_pb;
+    ICSBREC_PORT_BINDING_TABLE_FOR_EACH_TRACKED (isb_pb, isb_pb_table) {
+        if (icsbrec_port_binding_is_deleted(isb_pb)) {
+            const struct icsbrec_port_binding *isb_pb_old;
+            VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            if (ic_pb_get_type(isb_pb) != IC_ROUTER_PORT) {
+                isb_pb_old =
+                    shash_find_and_delete(&pb_data->switch_all_local_pbs,
+                                      isb_pb->logical_port);
+                VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            } else {
+                isb_pb_old =
+                    shash_find_and_delete(&pb_data->router_all_local_pbs,
+                                      isb_pb->logical_port);
+                VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            }
+            VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            ovn_free_tnlid(&pb_data->pb_tnlids, isb_pb->tunnel_key);
+            VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+
+        } else if (icsbrec_port_binding_is_new(isb_pb)) {
+            VLOG_INFO("DBG-PG  AQUIIIIII- - %s : %s : %d", __FILE__, __func__, __LINE__);
+            log_isb_pb(isb_pb);
+            /* This port is router, not need create lsp for it */
+            if (uuid_equals(&isb_pb->availability_zone->header_, &pb_input.runned_az->header_ )) {
+                VLOG_INFO("DBG-PG  AQUIIIIII- - %s : %s : %d", __FILE__, __func__, __LINE__);
+                return EN_HANDLED_UPDATED;
+            }
+            VLOG_INFO("DBG-PG  AQUIIIIII- - %s : %s : %d", __FILE__, __func__, __LINE__);
+            const struct nbrec_logical_switch *ls =
+                find_ts_in_nb(pb_input.nbrec_ls_by_name,
+                              isb_pb->transit_switch);
+            log_ls(ls);
+            VLOG_INFO("DBG-PG CRIANDO LSP REMOTA a PARTIR DO ISB_PB aprendido - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            create_nb_lsp(eng_ctx, isb_pb, ls);
+            VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+
+            ic_pb_get_type(isb_pb) != IC_ROUTER_PORT
+            ? shash_add(&pb_data->switch_all_local_pbs, isb_pb->logical_port,
+                        isb_pb)
+            : shash_add(&pb_data->router_all_local_pbs, isb_pb->logical_port,
+                        isb_pb);
+            VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            ovn_add_tnlid(&pb_data->pb_tnlids, isb_pb->tunnel_key);
+            VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+        } else if (icsbrec_port_binding_is_updated(isb_pb,
+            ICSBREC_PORT_BINDING_COL_TUNNEL_KEY)) {
+                VLOG_INFO("DBG-PG  AQUIIIIII22222222- - %s : %s : %d", __FILE__, __func__, __LINE__);
+                log_isb_pb(isb_pb);
+                const struct icsbrec_port_binding *isb_pb_old;
+                isb_pb_old = shash_find(&pb_data->switch_all_local_pbs,
+                                         isb_pb->tunnel_key);
+                VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+                ovn_free_tnlid(&pb_data->pb_tnlids, isb_pb_old->tunnel_key);
+                VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+                ovn_add_tnlid(&pb_data->pb_tnlids, isb_pb->tunnel_key);
+                VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+        }
+    }
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    return EN_HANDLED_UPDATED;
+}
+
+static void
+log_lsp(const struct nbrec_logical_switch_port *lsp)
+{
+    if (!lsp) {
+        VLOG_INFO("Logical_Switch_Port: [NULL]");
+        return;
+    }
+
+    VLOG_INFO("=====================");
+    VLOG_INFO("Logical_Switch_Port Dump:");
+    VLOG_INFO("  Name: %s", lsp->name);
+    VLOG_INFO("  Type: %s", lsp->type);
+    VLOG_INFO("  UUID: "UUID_FMT, UUID_ARGS(&lsp->header_.uuid));
+
+    /* 1. Status da Porta */
+    if (lsp->n_enabled) {
+        VLOG_INFO("  Enabled: %s", *lsp->enabled ? "true" : "false");
+    }
+    if (lsp->n_up) {
+        VLOG_INFO("  Up: %s", *lsp->up ? "true" : "false");
+    }
+
+    /* 2. Endereçamento (Addresses & Dynamic) */
+    VLOG_INFO("  Addresses Count: %"PRIuSIZE, lsp->n_addresses);
+    for (size_t i = 0; i < lsp->n_addresses; i++) {
+        VLOG_INFO("    Addr[%"PRIuSIZE"]: %s", i, lsp->addresses[i]);
+    }
+    if (lsp->dynamic_addresses) {
+        VLOG_INFO("  Dynamic Addresses: %s", lsp->dynamic_addresses);
+    }
+
+    /* 3. Conexões e Peers */
+    if (lsp->peer) {
+        VLOG_INFO("  Peer: %s", lsp->peer);
+    }
+    if (lsp->parent_name) {
+        VLOG_INFO("  Parent Name: %s", lsp->parent_name);
+    }
+
+    /* 4. Opções (Fundamental para o tipo 'router') */
+    struct smap_node *node;
+    SMAP_FOR_EACH (node, &lsp->options) {
+        VLOG_INFO("  Option: %s = %s", node->key, node->value);
+    }
+
+    /* 5. External IDs */
+    SMAP_FOR_EACH (node, &lsp->external_ids) {
+        VLOG_INFO("  External ID: %s = %s", node->key, node->value);
+    }
+
+    /* 6. Port Security e VLAN Tags */
+    if (lsp->n_port_security) {
+        VLOG_INFO("  Port Security Count: %"PRIuSIZE, lsp->n_port_security);
+    }
+    if (lsp->n_tag) {
+        VLOG_INFO("  Tag: %"PRId64, *lsp->tag);
+    }
+
+    /* 7. DHCP e HA Chassis */
+    if (lsp->dhcpv4_options) {
+        VLOG_INFO("  DHCPv4 Options UUID: "UUID_FMT, 
+                  UUID_ARGS(&lsp->dhcpv4_options->header_.uuid));
+    }
+    if (lsp->ha_chassis_group) {
+        VLOG_INFO("  HA Chassis Group: %s", lsp->ha_chassis_group->name);
+    }
+    VLOG_INFO("=====================");
+}
+
+static void
+log_ls(const struct nbrec_logical_switch *ls)
+{
+    if (!ls) {
+        VLOG_INFO("Logical_Switch: [NULL]");
+        return;
+    }
+
+    /* 1. Identificação Básica */
+    VLOG_INFO("=====================");
+    VLOG_INFO("Logical_Switch Dump:");
+    VLOG_INFO("  Name: %s", ls->name); /* Always nonnull segundo sua struct */
+    VLOG_INFO("  UUID: "UUID_FMT, UUID_ARGS(&ls->header_.uuid));
+
+    /* 2. Ports (Relação com LSPs) */
+    VLOG_INFO("  Ports Count: %"PRIuSIZE, ls->n_ports);
+    for (size_t i = 0; i < ls->n_ports; i++) {
+        VLOG_INFO("    Port[%"PRIuSIZE"]: %s", i, ls->ports[i]->name);
+    }
+
+    /* 3. External IDs (Onde fica o interconn-ts) */
+    struct smap_node *node;
+    SMAP_FOR_EACH (node, &ls->external_ids) {
+        VLOG_INFO("  External ID: %s = %s", node->key, node->value);
+    }
+
+    /* 4. Other Config */
+    SMAP_FOR_EACH (node, &ls->other_config) {
+        VLOG_INFO("  Other Config: %s = %s", node->key, node->value);
+    }
+
+    /* 5. Load Balancers e Grupos */
+    VLOG_INFO("  Load Balancers: %"PRIuSIZE" | LB Groups: %"PRIuSIZE, 
+              ls->n_load_balancer, ls->n_load_balancer_group);
+
+    /* 6. ACLs e QoS */
+    VLOG_INFO("  ACLs: %"PRIuSIZE" | QoS Rules: %"PRIuSIZE, 
+              ls->n_acls, ls->n_qos_rules);
+
+    /* 7. DNS e Forwarding Groups */
+    VLOG_INFO("  DNS Records: %"PRIuSIZE" | Fwd Groups: %"PRIuSIZE,
+              ls->n_dns_records, ls->n_forwarding_groups);
+
+    /* 8. CoPP */
+    if (ls->copp) {
+        VLOG_INFO("  CoPP: %s", ls->copp->name ? ls->copp->name : "unnamed");
+    }
+    VLOG_INFO("=====================");
+}
+
+static void
+log_ts(const struct icnbrec_transit_switch *ts)
+{
+    if (!ts) {
+        VLOG_INFO("Transit_Switch: [NULL]");
+        return;
+    }
+
+    VLOG_INFO("=====================");
+    VLOG_INFO("Transit_Switch Dump:");
+    VLOG_INFO("  Name: %s", ts->name); /* Always nonnull */
+    VLOG_INFO("  UUID: "UUID_FMT, UUID_ARGS(&ts->header_.uuid));
+
+    /* 1. External IDs */
+    struct smap_node *node;
+    if (!smap_is_empty(&ts->external_ids)) {
+        SMAP_FOR_EACH (node, &ts->external_ids) {
+            VLOG_INFO("  External ID: %s = %s", node->key, node->value);
+        }
+    } else {
+        VLOG_INFO("  External IDs: (empty)");
+    }
+
+    /* 2. Other Config */
+    if (!smap_is_empty(&ts->other_config)) {
+        SMAP_FOR_EACH (node, &ts->other_config) {
+            VLOG_INFO("  Other Config: %s = %s", node->key, node->value);
+        }
+    } else {
+        VLOG_INFO("  Other Config: (empty)");
+    }
+    VLOG_INFO("=====================");
+}
+
+/* Certifique-se de que esta definição está VISÍVEL antes da função */
+struct tnlid_node {
+    struct hmap_node hmap_node;
+    uint32_t tnlid;
+};
+
+static void
+log_sb_pb(const struct sbrec_port_binding *pb)
+{
+    if (!pb) {
+        VLOG_INFO("Port_Binding (SB): [NULL]");
+        return;
+    }
+
+    VLOG_INFO("=====================");
+    VLOG_INFO("SB Port_Binding Dump:");
+    /* 1. Identificação e Tipo */
+    VLOG_INFO("  Logical Port: %s", pb->logical_port);
+    VLOG_INFO("  Type: %s", pb->type);
+    VLOG_INFO("  Tunnel Key: %"PRId64, pb->tunnel_key);
+    VLOG_INFO("  UUID: "UUID_FMT, UUID_ARGS(&pb->header_.uuid));
+
+    /* 2. Datapath (Vínculo com o Switch/Router) */
+    if (pb->datapath) {
+        VLOG_INFO("  Datapath UUID: "UUID_FMT, 
+                  UUID_ARGS(&pb->datapath->header_.uuid));
+    }
+
+    /* 3. Rede (MACs e Endereços) */
+    for (size_t i = 0; i < pb->n_mac; i++) {
+        VLOG_INFO("  MAC[%s]: %s", "PRIuSIZE", pb->mac[i]);
+    }
+    if (pb->n_tag) {
+        VLOG_INFO("  VLAN Tag: %"PRId64, *pb->tag);
+    }
+
+    /* 4. Localização (Chassis Binding) */
+    if (pb->chassis) {
+        VLOG_INFO("  Chassis: %s", pb->chassis->name);
+    }
+    if (pb->encap) {
+        VLOG_INFO("  Encap Type: %s | IP: %s", pb->encap->type, pb->encap->ip);
+    }
+    if (pb->n_up) {
+        VLOG_INFO("  Status UP: %s", *pb->up ? "true" : "false");
+    }
+
+    /* 5. Hierarquia (Parent/Virtual) */
+    if (pb->parent_port) {
+        VLOG_INFO("  Parent Port: %s", pb->parent_port);
+    }
+    if (pb->virtual_parent) {
+        VLOG_INFO("  Virtual Parent: %s", pb->virtual_parent);
+    }
+
+    /* 6. Opções e External IDs */
+    struct smap_node *node;
+    SMAP_FOR_EACH (node, &pb->options) {
+        VLOG_INFO("  Option: %s = %s", node->key, node->value);
+    }
+    SMAP_FOR_EACH (node, &pb->external_ids) {
+        VLOG_INFO("  External ID: %s = %s", node->key, node->value);
+    }
+
+    /* 7. Chassis Adicionais e HA */
+    if (pb->n_additional_chassis) {
+        VLOG_INFO("  Additional Chassis Count: %"PRIuSIZE,
+                  pb->n_additional_chassis);
+    }
+    if (pb->ha_chassis_group) {
+        VLOG_INFO("  HA Group: %s", pb->ha_chassis_group->name);
+    }
+    VLOG_INFO("=====================");
+}
+
+static void
+log_isb_pb(const struct icsbrec_port_binding *isb_pb)
+{
+    if (!isb_pb) {
+        VLOG_INFO("IC-SB Port_Binding: [NULL]");
+        return;
+    }
+
+    VLOG_INFO("=====================");
+    VLOG_INFO("IC-SB Port_Binding Dump:");
+    
+    /* 1. Identificação de Rede Global */
+    VLOG_INFO("  Logical Port: %s", isb_pb->logical_port);
+    VLOG_INFO("  Type: %s", isb_pb->type ? isb_pb->type : "<none>");
+    VLOG_INFO("  Transit Switch: %s", isb_pb->transit_switch);
+    VLOG_INFO("  Tunnel Key: %"PRId64, isb_pb->tunnel_key);
+    VLOG_INFO("  UUID: "UUID_FMT, UUID_ARGS(&isb_pb->header_.uuid));
+
+    /* 2. Endereçamento e Roteamento */
+    VLOG_INFO("  Address: %s", isb_pb->address);
+    VLOG_INFO("  Gateway: %s", isb_pb->gateway);
+
+    /* 3. Localização (AZ e Encapsulamento) */
+    if (isb_pb->availability_zone) {
+        VLOG_INFO("  AZ: %s (UUID: "UUID_FMT")", 
+                  isb_pb->availability_zone->name,
+                  UUID_ARGS(&isb_pb->availability_zone->header_.uuid));
+    }
+
+    if (isb_pb->encap) {
+        VLOG_INFO("  Encap: %s (IP: %s)", isb_pb->encap->type,
+                  isb_pb->encap->ip);
+    }
+
+    /* 4. Rastreamento NB-IC (Se aplicável) */
+    if (isb_pb->n_nb_ic_uuid) {
+        VLOG_INFO("  NB-IC UUID: "UUID_FMT, UUID_ARGS(isb_pb->nb_ic_uuid));
+    }
+
+    /* 5. Metadados (External IDs) */
+    struct smap_node *node;
+    if (!smap_is_empty(&isb_pb->external_ids)) {
+        SMAP_FOR_EACH (node, &isb_pb->external_ids) {
+            VLOG_INFO("  External ID: %s = %s", node->key, node->value);
+        }
+    }
+    VLOG_INFO("=====================");
 }

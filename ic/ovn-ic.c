@@ -697,6 +697,10 @@ main(int argc, char *argv[])
     ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
                                &sbrec_port_binding_col_mac);
     ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
+                               &sbrec_port_binding_col_tunnel_key);
+    ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
+                               &sbrec_port_binding_col_type);
+    ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
                                &sbrec_port_binding_col_options);
     ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
                                &sbrec_port_binding_col_logical_port);
@@ -904,14 +908,14 @@ main(int argc, char *argv[])
 
                 if (!ovsdb_idl_loop_commit_and_wait(&ovninb_idl_loop)) {
                     VLOG_INFO("OVNINB commit failed, "
-                                "force recompute next time.");
-                    inc_proc_ic_force_recompute_immediate();
+                                "DISABLE force recompute next time.");
+                    //inc_proc_ic_force_recompute_immediate();
                 }
 
                 if (!ovsdb_idl_loop_commit_and_wait(&ovnisb_idl_loop)) {
                     VLOG_INFO("OVNISB commit failed, "
-                                "force recompute next time.");
-                    inc_proc_ic_force_recompute_immediate();
+                                "DISABLE force recompute next time.");
+                    //inc_proc_ic_force_recompute_immediate();
                 }
             } else {
                 /* Make sure we send any pending requests, e.g., lock. */

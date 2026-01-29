@@ -44,6 +44,7 @@ VLOG_DEFINE_THIS_MODULE(inc_proc_ic);
     NB_NODE(logical_router_static_route, "logical_router_static_route") \
     NB_NODE(logical_router, "logical_router") \
     NB_NODE(logical_switch, "logical_switch") \
+    NB_NODE(logical_switch_port, "logical_switch_port") \
     NB_NODE(load_balancer, "load_balancer") \
     NB_NODE(load_balancer_group, "load_balancer_group")
 
@@ -213,13 +214,23 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_tr, &en_icnb_transit_router, NULL);
     engine_add_input(&en_tr, &en_icnb_transit_router_port, NULL);
 
-    engine_add_input(&en_port_binding, &en_icnb_transit_switch, NULL);
-    engine_add_input(&en_port_binding, &en_icnb_transit_router, NULL);
-    engine_add_input(&en_port_binding, &en_icsb_port_binding, NULL);
-    engine_add_input(&en_port_binding, &en_nb_logical_switch, NULL);
-    engine_add_input(&en_port_binding, &en_sb_port_binding, NULL);
-    engine_add_input(&en_port_binding, &en_nb_logical_router, NULL);
-    engine_add_input(&en_port_binding, &en_sb_chassis, NULL);
+    /* No need for an explicit handler for the ICNB transit_switch changes.*/
+    //engine_add_input(&en_port_binding, &en_ts, engine_null_handler);
+    /* No need for an explicit handler for the ICNB transit_switch changes.*/
+    engine_add_input(&en_port_binding, &en_icnb_transit_switch, engine_noop_handler);
+    /* No need for an explicit handler for the ICNB transit_switch changes.*/
+    engine_add_input(&en_port_binding, &en_icnb_transit_router, engine_noop_handler);
+    /* No need for an explicit handler for the ICSB port_binding changes.*/
+    //port_binding_icsb_port_binding_handler
+    engine_add_input(&en_port_binding, &en_icsb_port_binding, port_binding_icsb_port_binding_handler);
+    /* No need for an explicit handler for the NB logical_switch changes.*/
+    engine_add_input(&en_port_binding, &en_nb_logical_switch, engine_noop_handler);
+    engine_add_input(&en_port_binding, &en_sb_port_binding, port_binding_sb_port_binding_handler);
+    /* No need for an explicit handler for the NB logical_router changes.*/
+    engine_add_input(&en_port_binding, &en_nb_logical_router, engine_noop_handler);
+    /* No need for an explicit handler for the SB chassis changes.*/
+    engine_add_input(&en_port_binding, &en_sb_chassis, engine_noop_handler);
+    engine_add_input(&en_port_binding, &en_nb_logical_switch_port, port_binding_nb_logical_switch_port_handler);
 
     engine_add_input(&en_route, &en_nb_nb_global, NULL);
     engine_add_input(&en_route, &en_nb_logical_switch, NULL);
@@ -259,6 +270,11 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
     struct ovsdb_idl_index *nbrec_lrp_by_name
         = ovsdb_idl_index_create1(nb->idl,
                                   &nbrec_logical_router_port_col_name);
+    struct ovsdb_idl_index *nbrec_lsp_by_name
+        = ovsdb_idl_index_create1(nb->idl,
+                                  &nbrec_logical_switch_port_col_name);
+    struct ovsdb_idl_index *nbrec_ls_by_lsp_port
+        = ovsdb_idl_index_create1(nb->idl, &nbrec_logical_switch_col_ports);
     struct ovsdb_idl_index *nbrec_port_by_name
         = ovsdb_idl_index_create1(nb->idl,
                                   &nbrec_logical_switch_port_col_name);
@@ -277,6 +293,9 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
         = ovsdb_idl_index_create2(sb->idl,
                                   &sbrec_service_monitor_col_remote,
                                   &sbrec_service_monitor_col_logical_port);
+    struct ovsdb_idl_index *icsbrec_port_binding_by_name
+        = ovsdb_idl_index_create1(icsb->idl,
+                                  &icsbrec_port_binding_col_logical_port);
     struct ovsdb_idl_index *icnbrec_transit_switch_by_name
         = ovsdb_idl_index_create1(icnb->idl,
                                   &icnbrec_transit_switch_col_name);
@@ -323,6 +342,12 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
     engine_ovsdb_node_add_index(&en_nb_logical_router,
                                 "nbrec_lrp_by_name",
                                 nbrec_lrp_by_name);
+    engine_ovsdb_node_add_index(&en_nb_logical_switch_port,
+                                "nbrec_lsp_by_name",
+                                nbrec_lsp_by_name);
+    engine_ovsdb_node_add_index(&en_nb_logical_switch,
+                                "nbrec_ls_by_lsp_port",
+                                nbrec_ls_by_lsp_port);
     engine_ovsdb_node_add_index(&en_nb_logical_switch,
                                 "nbrec_port_by_name",
                                 nbrec_port_by_name);
@@ -344,6 +369,9 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
     engine_ovsdb_node_add_index(&en_icnb_transit_switch,
                                 "icnbrec_transit_switch_by_name",
                                 icnbrec_transit_switch_by_name);
+    engine_ovsdb_node_add_index(&en_icsb_port_binding,
+                                "icsbrec_port_binding_by_name",
+                                icsbrec_port_binding_by_name);
     engine_ovsdb_node_add_index(&en_icsb_port_binding,
                                 "icsbrec_port_binding_by_az",
                                 icsbrec_port_binding_by_az);
