@@ -619,6 +619,8 @@ main(int argc, char *argv[])
                                &nbrec_logical_router_port_col_external_ids);
     ovsdb_idl_track_add_column(ovnnb_idl_loop.idl,
                                &nbrec_logical_router_port_col_options);
+    ovsdb_idl_track_add_column(ovnnb_idl_loop.idl,
+                               &nbrec_logical_router_port_col_status);
 
     ovsdb_idl_add_table(ovnnb_idl_loop.idl, &nbrec_table_logical_switch);
     ovsdb_idl_track_add_column(ovnnb_idl_loop.idl,
@@ -697,6 +699,10 @@ main(int argc, char *argv[])
                                &sbrec_port_binding_col_datapath);
     ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
                                &sbrec_port_binding_col_mac);
+    ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
+                               &sbrec_port_binding_col_tunnel_key);
+    ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
+                               &sbrec_port_binding_col_type);
     ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
                                &sbrec_port_binding_col_options);
     ovsdb_idl_track_add_column(ovnsb_idl_loop.idl,
@@ -905,14 +911,14 @@ main(int argc, char *argv[])
 
                 if (!ovsdb_idl_loop_commit_and_wait(&ovninb_idl_loop)) {
                     VLOG_INFO("OVNINB commit failed, "
-                                "force recompute next time.");
-                    inc_proc_ic_force_recompute_immediate();
+                                "DISABLE force recompute next time.");
+                    //inc_proc_ic_force_recompute_immediate();
                 }
 
                 if (!ovsdb_idl_loop_commit_and_wait(&ovnisb_idl_loop)) {
                     VLOG_INFO("OVNISB commit failed, "
-                                "force recompute next time.");
-                    inc_proc_ic_force_recompute_immediate();
+                                "DISABLE force recompute next time.");
+                    //inc_proc_ic_force_recompute_immediate();
                 }
             } else {
                 /* Make sure we send any pending requests, e.g., lock. */

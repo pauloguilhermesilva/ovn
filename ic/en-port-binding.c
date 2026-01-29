@@ -20,10 +20,14 @@
 
 /* OVS includes. */
 #include "openvswitch/vlog.h"
+#include "openvswitch/util.h"
+#include "openvswitch/shash.h"
+#include "openvswitch/hmap.h"
 
 /* OVN includes. */
 #include "ovn-ic.h"
 #include "en-port-binding.h"
+#include "en-ts.h"
 #include "inc-proc-ic.h"
 #include "lib/inc-proc-eng.h"
 #include "lib/ovn-nb-idl.h"
@@ -51,7 +55,7 @@ static void port_binding_clear(struct ed_type_port_binding *data);
 static void port_binding_get_input_data(struct engine_node *node,
                                         struct pb_input *input_data);
 static const struct nbrec_logical_router *
-    find_tr_in_nb(struct pb_input *pb, char *tr_name);
+    find_tr_in_nb(struct pb_input *pb, const char *tr_name);
 static const struct sbrec_port_binding *
     find_peer_port(struct pb_input *pb,
                    const struct sbrec_port_binding *sb_pb);
@@ -114,6 +118,49 @@ static void
 static const struct sbrec_port_binding *
     find_lsp_in_sb(struct pb_input *pb,
                    const struct nbrec_logical_switch_port *lsp);
+static const struct nbrec_logical_switch_port *
+    find_nb_lsp_from_sb_pb(struct pb_input *pb,
+                           const struct sbrec_port_binding *sb_pb);
+struct icsbrec_port_binding *
+    find_isb_pb_by_name(struct pb_input *pb, const char *name);
+struct icnbrec_transit_switch *
+    find_inb_ts_by_name(struct pb_input *pb, const char *name);
+struct icnbrec_transit_router_port *
+    find_inb_trp_by_name(struct pb_input *pb, const char *name);
+struct nbrec_logical_router_port *
+    find_nb_lrp_by_name(struct pb_input *pb, const char *name);
+static const struct nbrec_logical_switch *
+    find_ls_from_lsp(const struct nbrec_logical_switch_table *nb_ls_table,
+                     const struct nbrec_logical_switch_port *lsp);
+static const struct nbrec_logical_router *
+    find_lr_from_lrp(const struct nbrec_logical_router_table *nb_lr_table,
+                     const struct nbrec_logical_router_port *lrp);
+static enum sb_pb_interconn_port_func
+    pb_sb_classify(struct pb_input *pb_input,
+                   const struct sbrec_port_binding *sb_pb,
+                   const struct icsbrec_port_binding **isb_pb,
+                   const struct nbrec_logical_switch **nb_ls,
+                   const struct nbrec_logical_switch_port **nb_lsp,
+                   const struct icnbrec_transit_switch **inb_ts,
+                   const struct nbrec_logical_switch_table *nb_ls_table);
+static void
+    compose_create_isb_pb(const struct engine_context *eng_ctx,
+                          struct pb_input *pb,
+                          struct ed_type_port_binding *pb_data,
+                          const struct sbrec_port_binding *sb_pb,
+                          const struct nbrec_logical_switch_port *nb_lsp,
+                          const struct icsbrec_port_binding *isb_pb,
+                          const struct icnbrec_transit_switch *inb_ts);
+static const struct icnbrec_transit_router *
+    find_tr_from_trp(const struct icnbrec_transit_router_table *inb_tr_table,
+                     const struct icnbrec_transit_router_port *lrp);
+//bool
+//update_isb_pb(const struct engine_context *ctx, const char *logical_port,
+//              const struct icsbrec_availability_zone *az, const char *ts_name,
+//              const struct uuid *nb_ic_uuid, const char *type,
+//              struct hmap *pb_tnlids);
+//static bool is_pb_associated_with_ts(struct pb_input *pb,
+//                                     const struct sbrec_port_binding *sb_pb);
 
 static void
 port_binding_get_input_data(struct engine_node *node,
@@ -128,10 +175,22 @@ port_binding_get_input_data(struct engine_node *node,
         engine_ovsdb_node_get_index(
             engine_get_input("ICSB_port_binding", node),
             "icsbrec_port_binding_by_ts");
+    input_data->icsbrec_port_binding_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("ICSB_port_binding", node),
+            "icsbrec_port_binding_by_name");
     input_data->nbrec_ls_by_name =
         engine_ovsdb_node_get_index(
             engine_get_input("NB_logical_switch", node),
             "nbrec_ls_by_name");
+    input_data->nbrec_lsp_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("NB_logical_switch_port", node),
+            "nbrec_lsp_by_name");
+    input_data->nbrec_lrp_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("NB_logical_router", node),
+            "nbrec_lrp_by_name");
     input_data->sbrec_port_binding_by_name =
         engine_ovsdb_node_get_index(
             engine_get_input("SB_port_binding", node),
@@ -144,10 +203,22 @@ port_binding_get_input_data(struct engine_node *node,
         engine_ovsdb_node_get_index(
             engine_get_input("NB_logical_router", node),
             "nbrec_lr_by_name");
+    input_data->nbrec_ls_by_lsp_port =
+        engine_ovsdb_node_get_index(
+            engine_get_input("NB_logical_switch", node),
+            "nbrec_ls_by_lsp_port");
     input_data->sbrec_chassis_by_name =
         engine_ovsdb_node_get_index(
             engine_get_input("SB_chassis", node),
             "sbrec_chassis_by_name");
+    input_data->icnbrec_transit_switch_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("ICNB_transit_switch", node),
+            "icnbrec_transit_switch_by_name");
+    input_data->icnbrec_transit_router_port_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("ICNB_transit_router_port", node),
+            "icnbrec_transit_router_port_by_name");
 }
 
 enum engine_node_state
@@ -226,6 +297,9 @@ port_binding_run(const struct engine_context *eng_ctx,
                  const struct icnbrec_transit_switch_table *icnb_ts_table,
                  const struct icnbrec_transit_router_table *icnb_tr_table)
 {
+    VLOG_INFO("DBG-PG -====================== - %s : %s : %d", __FILE__, __func__, __LINE__);
+    VLOG_INFO("DBG-PG - FULL-RECOMPUTE-PB - %s : %s : %d", __FILE__, __func__, __LINE__);
+    VLOG_INFO("DBG-PG -====================== - %s : %s : %d", __FILE__, __func__, __LINE__);
     if (!eng_ctx->ovnisb_idl_txn || !eng_ctx->ovnnb_idl_txn
         || !eng_ctx->ovnsb_idl_txn) {
         return;
@@ -297,7 +371,7 @@ port_binding_run(const struct engine_context *eng_ctx,
                         eng_ctx, sb_pb->logical_port, pb_input->runned_az,
                         ts->name, &ts->header_.uuid, "transit-switch-port",
                         &pb_data->pb_tnlids);
-                    sync_ts_isb_pb(pb_input, sb_pb, isb_pb);
+                    sync_remote_port(pb_input, isb_pb, lsp, sb_pb);
                 } else {
                     sync_local_port(pb_input, isb_pb, sb_pb, lsp);
                 }
@@ -429,7 +503,7 @@ port_binding_run(const struct engine_context *eng_ctx,
 }
 
 static const struct nbrec_logical_router *
-find_tr_in_nb(struct pb_input *pb, char *tr_name)
+find_tr_in_nb(struct pb_input *pb, const char *tr_name)
 {
     const struct nbrec_logical_router *key =
         nbrec_logical_router_index_init_row(pb->nbrec_lr_by_name);
@@ -790,6 +864,32 @@ create_isb_pb(const struct engine_context *ctx, const char *logical_port,
     return isb_pb;
 }
 
+#if 0
+bool
+update_isb_pb(const struct engine_context *ctx, const char *logical_port,
+              const struct icsbrec_availability_zone *az, const char *ts_name,
+              const struct uuid *nb_ic_uuid, const char *type,
+              struct hmap *pb_tnlids)
+{
+    bool ret;
+    uint32_t pb_tnl_key = allocate_port_key(pb_tnlids);
+    if (!pb_tnl_key) {
+        return NULL;
+    }
+
+    const struct icsbrec_port_binding *isb_pb;
+
+    ret = icsbrec_port_binding_is_updated(ctx->ovnisb_idl_txn,
+                                          ICSBREC_PORT_BINDING_N_COLUMNS);
+    icsbrec_port_binding_set_availability_zone(isb_pb, az);
+    icsbrec_port_binding_set_transit_switch(isb_pb, ts_name);
+    icsbrec_port_binding_set_logical_port(isb_pb, logical_port);
+    icsbrec_port_binding_set_tunnel_key(isb_pb, pb_tnl_key);
+    icsbrec_port_binding_set_nb_ic_uuid(isb_pb, nb_ic_uuid, 1);
+    icsbrec_port_binding_set_type(isb_pb, type);
+}
+#endif
+
 static bool
 trp_is_remote(struct pb_input *pb, const char *chassis_name)
 {
@@ -850,4 +950,589 @@ find_lsp_in_sb(struct pb_input *pb,
                const struct nbrec_logical_switch_port *lsp)
 {
     return find_sb_pb_by_name(pb->sbrec_port_binding_by_name, lsp->name);
+}
+
+#if 0
+static const struct nbrec_logical_switch *
+find_ls_from_lsp(struct pb_input *pb,
+                 const struct nbrec_logical_switch_port *lsp)
+{
+    struct nbrec_logical_switch *key =
+        nbrec_logical_switch_index_init_row(pb->nbrec_ls_by_lsp_port);
+    nbrec_logical_switch_index_set_ports(key,
+        (struct nbrec_logical_switch_port **) &lsp, 1);
+    const struct nbrec_logical_switch *ls =
+        nbrec_logical_switch_index_find(pb->nbrec_ls_by_lsp_port, key);
+
+    nbrec_logical_switch_index_destroy_row(key);
+    return ls;
+}
+#endif
+
+static const struct nbrec_logical_switch *
+find_ls_from_lsp(const struct nbrec_logical_switch_table *nb_ls_table,
+                 const struct nbrec_logical_switch_port *lsp)
+{
+    const struct nbrec_logical_switch *ls;
+    NBREC_LOGICAL_SWITCH_TABLE_FOR_EACH(ls, nb_ls_table) {
+        for (size_t i = 0; i < ls->n_ports; i++) {
+            if (ls->ports[i] == lsp) {
+                return ls;
+            }
+        }
+    }
+    return NULL;
+}
+
+static const struct nbrec_logical_router *
+find_lr_from_lrp(const struct nbrec_logical_router_table *nb_lr_table,
+                 const struct nbrec_logical_router_port *lrp)
+{
+    if (!lrp) {
+        return NULL;
+    }
+    const struct nbrec_logical_router *lr;
+    NBREC_LOGICAL_ROUTER_TABLE_FOR_EACH(lr, nb_lr_table) {
+        for (size_t i = 0; i < lr->n_ports; i++) {
+            if (lr->ports[i] == lrp) {
+                return lr;
+            }
+        }
+    }
+    return NULL;
+}
+
+static const struct icnbrec_transit_router *
+find_tr_from_trp(const struct icnbrec_transit_router_table *inb_tr_table,
+                 const struct icnbrec_transit_router_port *trp)
+{
+    const struct icnbrec_transit_router *tr;
+    ICNBREC_TRANSIT_ROUTER_TABLE_FOR_EACH(tr, inb_tr_table) {
+        for (size_t i = 0; i < tr->n_ports; i++) {
+            if (tr->ports[i] == trp) {
+                return tr;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+static const struct nbrec_logical_switch_port *
+find_nb_lsp_from_sb_pb(struct pb_input *pb,
+                       const struct sbrec_port_binding *sb_pb)
+{
+    struct nbrec_logical_switch_port *key =
+        nbrec_logical_switch_port_index_init_row(pb->nbrec_lsp_by_name);
+    nbrec_logical_switch_port_index_set_name(key, sb_pb->logical_port);
+    const struct nbrec_logical_switch_port *nb_lsp =
+        nbrec_logical_switch_port_index_find(pb->nbrec_lsp_by_name, key);
+
+    nbrec_logical_switch_port_index_destroy_row(key);
+    return nb_lsp;
+}
+
+static const struct nbrec_logical_switch_port *
+find_nb_lsp_from_isb_pb(struct pb_input *pb,
+                        const struct icsbrec_port_binding *icsb_pb)
+{
+    struct nbrec_logical_switch_port *key =
+        nbrec_logical_switch_port_index_init_row(pb->nbrec_lsp_by_name);
+    nbrec_logical_switch_port_index_set_name(key, icsb_pb->logical_port);
+    const struct nbrec_logical_switch_port *nb_lsp =
+        nbrec_logical_switch_port_index_find(pb->nbrec_lsp_by_name, key);
+
+    nbrec_logical_switch_port_index_destroy_row(key);
+    return nb_lsp;
+}
+
+struct icsbrec_port_binding *
+find_isb_pb_by_name(struct pb_input *pb, const char *name)
+{
+    struct icsbrec_port_binding *key =
+        icsbrec_port_binding_index_init_row(pb->icsbrec_port_binding_by_name);
+    
+    icsbrec_port_binding_index_set_logical_port(key, name);
+    struct icsbrec_port_binding *isb_pb =
+        icsbrec_port_binding_index_find(pb->icsbrec_port_binding_by_name, key);
+
+    icsbrec_port_binding_index_destroy_row(key);
+
+    return isb_pb;
+}
+
+struct icnbrec_transit_switch *
+find_inb_ts_by_name(struct pb_input *pb, const char *name)
+{
+    struct icnbrec_transit_switch *key =
+        icnbrec_transit_switch_index_init_row(
+            pb->icnbrec_transit_switch_by_name);
+    icnbrec_transit_switch_index_set_name(key, name);
+    struct icnbrec_transit_switch *inb_ts =
+        icnbrec_transit_switch_index_find(pb->icnbrec_transit_switch_by_name,
+                                          key);
+
+    icnbrec_transit_switch_index_destroy_row(key);
+
+    return inb_ts;
+}
+
+struct icnbrec_transit_router_port *
+find_inb_trp_by_name(struct pb_input *pb, const char *name)
+{
+    struct icnbrec_transit_router_port *key =
+        icnbrec_transit_router_port_index_init_row(
+            pb->icnbrec_transit_router_port_by_name);
+    icnbrec_transit_router_port_index_set_name(key, name);
+    struct icnbrec_transit_router_port *inb_trp =
+        icnbrec_transit_router_port_index_find(
+            pb->icnbrec_transit_router_port_by_name, key);
+
+    icnbrec_transit_router_port_index_destroy_row(key);
+
+    return inb_trp;
+}
+
+#if 0
+struct nbrec_logical_router_port *
+find_nb_lrp_by_name(struct pb_input *pb, const char *name)
+{
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    struct nbrec_logical_router_port *key =
+        nbrec_logical_router_port_index_init_row(
+            pb->nbrec_lrp_by_name);
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    nbrec_logical_router_port_index_set_name(key, name);
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    struct nbrec_logical_router_port *nb_lrp =
+        nbrec_logical_router_port_index_find(
+            pb->nbrec_lrp_by_name, key);
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+
+    nbrec_logical_router_port_index_destroy_row(key);
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+
+    return nb_lrp;
+}
+#endif
+
+#if 0
+static bool
+is_pb_associated_with_ts(struct pb_input *pb,
+                         const struct sbrec_port_binding *sb_pb)
+{
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    bool ret = false;
+
+    if (!sb_pb->datapath) {
+        return false;
+    }
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    //const char *ls_name = smap_get(&sb_pb->datapath->external_ids, "name");
+    //if (!ls_name) {
+    //    return false;
+    //}
+    const struct nbrec_logical_switch_port *lsp =
+        find_nb_lsp_from_sb_pb(pb, sb_pb);
+    
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    struct icnbrec_transit_switch *ts_key =
+        icnbrec_transit_switch_index_init_row(
+            pb->icnbrec_transit_switch_by_name);
+    icnbrec_transit_switch_index_set_name(ts_key, ls_name);
+    if (icnbrec_transit_switch_index_find(pb->icnbrec_transit_switch_by_name,
+                                          ts_key)) {
+        ret = true;
+    }
+    icnbrec_transit_switch_index_destroy_row(ts_key);
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    return ret;
+}
+#endif
+
+static void
+compose_create_isb_pb(const struct engine_context *eng_ctx,
+                      struct pb_input *pb,
+                      struct ed_type_port_binding *pb_data,
+                      const struct sbrec_port_binding *sb_pb,
+                      const struct nbrec_logical_switch_port *nb_lsp,
+                      const struct icsbrec_port_binding *isb_pb,
+                      const struct icnbrec_transit_switch *inb_ts)
+{
+    if (!strcmp(nb_lsp->type, "router") || !strcmp(nb_lsp->type, "switch")) {
+        isb_pb = create_isb_pb(eng_ctx, nb_lsp->name, pb->runned_az,
+                               inb_ts->name, &inb_ts->header_.uuid,
+                               "transit-switch-port", &pb_data->pb_tnlids);
+        sync_ts_isb_pb(pb, sb_pb, isb_pb);
+        sync_local_port(pb, isb_pb, sb_pb, nb_lsp);
+    }
+}
+
+static enum sb_pb_interconn_port_func
+pb_sb_classify(struct pb_input *pb_input,
+               const struct sbrec_port_binding *sb_pb,
+               const struct icsbrec_port_binding **isb_pb,
+               const struct nbrec_logical_switch **nb_ls,
+               const struct nbrec_logical_switch_port **nb_lsp,
+               const struct icnbrec_transit_switch **inb_ts,
+               const struct nbrec_logical_switch_table *nb_ls_table)
+{
+    *isb_pb = NULL;
+    *nb_ls = NULL;
+    *nb_lsp = NULL;
+    *inb_ts = NULL;
+
+    if (sb_pb->mac && sb_pb->type) {
+        if (!strcmp(sb_pb->mac[0], "router") &&
+           (!strcmp(sb_pb->type, "patch"))) {
+            /* LSP - local port*/
+            *nb_lsp = find_nb_lsp_from_sb_pb(pb_input, sb_pb);
+            if (!*nb_lsp) {
+                return sb_pb_interconn_untreatable;
+            }
+            *isb_pb = find_isb_pb_by_name(pb_input, sb_pb->logical_port);
+            *nb_ls = find_ls_from_lsp(nb_ls_table, *nb_lsp);
+            if (!*nb_ls) {
+                return sb_pb_interconn_untreatable;
+            }
+            const char *ts_name = smap_get(&(*nb_ls)->other_config,
+                                           "interconn-ts");
+            if (ts_name) {
+                *inb_ts = find_inb_ts_by_name(pb_input, ts_name);
+                if (*inb_ts) {
+                    return sb_pb_interconn_local_port_lsp;
+                } else {
+                    return sb_pb_interconn_untreatable;
+                }
+            }
+
+#if 1
+        } else if (!strcmp(sb_pb->type, "chassisredirect")) {
+            VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+            //log_sb_pb(sb_pb);
+            const char *port = smap_get(&sb_pb->options,
+                                                    "distributed-port");
+            VLOG_INFO("DBG-PG -cr_name=%s - %s : %s : %d", port, __FILE__, __func__, __LINE__);
+            *isb_pb = find_isb_pb_by_name(pb_input, port);
+            //log_isb_pb(*isb_pb);
+            if (*isb_pb) {
+                VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+                return sb_pb_interconn_local_port_lrp;
+            } else {
+                VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+                return sb_pb_interconn_untreatable;
+            }
+#endif
+        } else if (smap_get(&sb_pb->options, "peer") &&
+                            !strcmp(sb_pb->type, "patch")) {
+            /* LRP - local port*/
+            const char *peer = smap_get(&sb_pb->options, "peer");
+            if (peer) {
+                *isb_pb = find_isb_pb_by_name(pb_input, peer);
+                if (*isb_pb) {
+                    return sb_pb_interconn_local_port_lrp;
+                } else {
+                    return sb_pb_interconn_untreatable;
+                }
+            } else {
+                return sb_pb_interconn_untreatable;
+            }
+        }
+    } else if (!strcmp(sb_pb->type, "remote")) {
+        /* LSP - remote port*/
+        return sb_pb_interconn_remote_port;
+    } else {
+        return sb_pb_interconn_untreatable;
+    }
+    return sb_pb_interconn_untreatable;
+}
+
+/* Handler functions. */
+enum engine_input_handler_result
+port_binding_sb_port_binding_handler(struct engine_node *node,
+                                     void *data)
+{
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct pb_input pb_input;
+    struct ed_type_port_binding *pb_data = data;
+    const struct sbrec_port_binding_table *sb_pb_table =
+        EN_OVSDB_GET(engine_get_input("SB_port_binding", node));
+    const struct nbrec_logical_switch_table *nb_ls_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_switch", node));
+    int pb_sb_function;
+    port_binding_get_input_data(node, &pb_input);
+    pb_input.runned_az = eng_ctx->client_ctx;
+    const struct sbrec_port_binding *sb_pb;
+
+    SBREC_PORT_BINDING_TABLE_FOR_EACH_TRACKED (sb_pb, sb_pb_table) {
+        const struct icsbrec_port_binding *isb_pb;
+        const struct nbrec_logical_switch *nb_ls;
+        const struct nbrec_logical_switch_port *nb_lsp;
+        const struct icnbrec_transit_switch *inb_ts;
+
+        pb_sb_function = pb_sb_classify(&pb_input, sb_pb, &isb_pb, &nb_ls,
+                                        &nb_lsp, &inb_ts, nb_ls_table);
+
+        if (pb_sb_function == sb_pb_interconn_untreatable) {
+            continue;
+        }
+
+        if (sbrec_port_binding_is_deleted(sb_pb)) {
+            if (pb_sb_function == sb_pb_interconn_local_port_lsp) {
+                if (isb_pb) {
+                    icsbrec_port_binding_delete(isb_pb);
+                }
+            } else if (pb_sb_function == sb_pb_interconn_local_port_lrp) {
+                if (isb_pb) {
+                    const char *address = "";
+                    icsbrec_port_binding_set_address(isb_pb, address);
+                }
+            }
+        } else if (sbrec_port_binding_is_new(sb_pb)) {
+            if (pb_sb_function == sb_pb_interconn_local_port_lsp) {
+                if (!isb_pb) {
+                    compose_create_isb_pb(eng_ctx, &pb_input, pb_data, sb_pb,
+                                          nb_lsp, isb_pb, inb_ts);
+                } else {
+                    sync_remote_port(&pb_input, isb_pb, nb_lsp, sb_pb);
+                }
+            }
+            if (isb_pb) {
+                nb_lsp = find_nb_lsp_from_isb_pb(&pb_input, isb_pb);
+                const struct nbrec_logical_switch_port *lsp_peer =
+                    find_nb_lsp_from_isb_pb(&pb_input, isb_pb);
+                const struct sbrec_port_binding *sb_pb_peer =
+                    find_lsp_in_sb(&pb_input, lsp_peer);
+                sync_ts_isb_pb(&pb_input, sb_pb_peer, isb_pb);
+            }
+        } else {
+            if (pb_sb_function == sb_pb_interconn_remote_port) {
+                if (isb_pb) {
+                    sync_remote_port(&pb_input, isb_pb, nb_lsp, sb_pb);
+                }
+            } else if (pb_sb_function == sb_pb_interconn_local_port_lrp) {
+                if (isb_pb) {
+                    const struct nbrec_logical_switch_port *lsp_peer =
+                        find_nb_lsp_from_isb_pb(&pb_input, isb_pb);
+                    const struct sbrec_port_binding *sb_pb_peer =
+                        find_lsp_in_sb(&pb_input, lsp_peer);
+                    sync_ts_isb_pb(&pb_input, sb_pb_peer, isb_pb);
+                }
+            }
+        }
+    }
+
+    return EN_HANDLED_UPDATED;
+}
+
+enum engine_input_handler_result
+port_binding_nb_logical_switch_port_handler(struct engine_node *node,
+                                            void *data OVS_UNUSED)
+{
+    VLOG_INFO("DBG-PG - %s : %s : %d", __FILE__, __func__, __LINE__);
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct pb_input pb_input;
+
+    const struct nbrec_logical_switch_port_table *nb_lsp_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_switch_port", node));
+
+    port_binding_get_input_data(node, &pb_input);
+    pb_input.runned_az = eng_ctx->client_ctx;
+
+    const struct nbrec_logical_switch_port *nb_lsp;
+    NBREC_LOGICAL_SWITCH_PORT_TABLE_FOR_EACH_TRACKED (nb_lsp, nb_lsp_table) {
+        if (nbrec_logical_switch_port_is_deleted(nb_lsp)) {
+            const char *port_name = nb_lsp->name;
+            if (!port_name) {
+                continue;
+            }
+            struct icsbrec_port_binding *isb_pb =
+                find_isb_pb_by_name(&pb_input, port_name);
+            if (isb_pb) {
+                /* icsbrec_port_binding_delete only is not remote */
+                if (uuid_equals(&isb_pb->availability_zone->header_.uuid,
+                    &pb_input.runned_az->header_.uuid)) {
+                    icsbrec_port_binding_delete(isb_pb);
+                }
+            }
+        }
+    }
+    return EN_HANDLED_UPDATED;
+}
+
+enum engine_input_handler_result
+port_binding_icsb_port_binding_handler(struct engine_node *node,
+                                       void *data)
+{
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct ed_type_port_binding *pb_data = data;
+    struct pb_input pb_input;
+
+    const struct icsbrec_port_binding_table *isb_pb_table =
+        EN_OVSDB_GET(engine_get_input("ICSB_port_binding", node));
+    const struct nbrec_logical_switch_table *nb_ls_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_switch", node));
+
+    port_binding_get_input_data(node, &pb_input);
+    pb_input.runned_az = eng_ctx->client_ctx;
+
+    const struct icsbrec_port_binding *isb_pb;
+    ICSBREC_PORT_BINDING_TABLE_FOR_EACH_TRACKED (isb_pb, isb_pb_table) {
+        if (icsbrec_port_binding_is_deleted(isb_pb)) {
+            const struct icsbrec_port_binding *isb_pb_old;
+            if (ic_pb_get_type(isb_pb) != IC_ROUTER_PORT) {
+                const struct nbrec_logical_switch_port *nb_lsp;
+                nb_lsp = find_nb_lsp_from_isb_pb(&pb_input, isb_pb);
+                if (nb_lsp) {
+                    const struct nbrec_logical_switch *nb_ls =
+                        find_ls_from_lsp(nb_ls_table, nb_lsp);
+                    if (nb_ls) {
+                        nbrec_logical_switch_update_ports_delvalue(nb_ls,
+                                                                   nb_lsp);
+                        nbrec_logical_switch_port_delete(nb_lsp);
+                    }
+                }
+                isb_pb_old =
+                    shash_find_and_delete(&pb_data->switch_all_local_pbs,
+                                          isb_pb->logical_port);
+            } else {
+                isb_pb_old =
+                    shash_find_and_delete(&pb_data->router_all_local_pbs,
+                                      isb_pb->logical_port);
+            }
+            ovn_free_tnlid(&pb_data->pb_tnlids, isb_pb->tunnel_key);
+        } else if (icsbrec_port_binding_is_new(isb_pb)) {
+            if (ic_pb_get_type(isb_pb) != IC_ROUTER_PORT) {
+                if (uuid_equals(&isb_pb->availability_zone->header_.uuid,
+                                &pb_input.runned_az->header_.uuid)) {
+                    continue;
+                }
+                const struct nbrec_logical_switch *ls =
+                    find_ts_in_nb(pb_input.nbrec_ls_by_name,
+                                isb_pb->transit_switch);
+                create_nb_lsp(eng_ctx, isb_pb, ls);
+                ic_pb_get_type(isb_pb) != IC_ROUTER_PORT
+                ? shash_add(&pb_data->switch_all_local_pbs,
+                            isb_pb->logical_port, isb_pb)
+                : shash_add(&pb_data->router_all_local_pbs,
+                            isb_pb->logical_port, isb_pb);
+                ovn_add_tnlid(&pb_data->pb_tnlids, isb_pb->tunnel_key);
+            } else {
+                const struct nbrec_logical_router_port *lrp;
+                const struct nbrec_logical_router *lr =
+                    find_tr_in_nb(&pb_input, isb_pb->transit_switch);
+                const struct icnbrec_transit_router_port *trp =
+                    find_inb_trp_by_name(&pb_input, isb_pb->logical_port);
+                lrp = lrp_create(eng_ctx, lr, trp);
+                sync_router_port(isb_pb, trp, lrp);
+            }
+        } else {
+            if (ic_pb_get_type(isb_pb) != IC_ROUTER_PORT) {
+                /* This port is local(router), not need create lsp for it */
+                if (uuid_equals(&isb_pb->availability_zone->header_.uuid,
+                                &pb_input.runned_az->header_.uuid)) {
+                    continue;
+                }
+                const struct nbrec_logical_switch_port *nb_lsp;
+                const struct sbrec_port_binding *sb_pb;
+                nb_lsp = find_nb_lsp_from_isb_pb(&pb_input, isb_pb);
+                if (!nb_lsp) {
+                    continue;
+                }
+                sb_pb = find_lsp_in_sb(&pb_input, nb_lsp);
+                sync_remote_port(&pb_input, isb_pb, nb_lsp, sb_pb);
+            }
+        }
+    }
+
+    return EN_HANDLED_UPDATED;
+}
+
+enum engine_input_handler_result
+port_binding_icnb_transit_router_handler(struct engine_node *node,
+                                         void *data OVS_UNUSED)
+{
+    VLOG_INFO("DBG-PG - %s : %s : %d", __FILE__, __func__, __LINE__);
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct pb_input pb_input;
+
+    const struct icnbrec_transit_router_table *inb_tr_table =
+        EN_OVSDB_GET(engine_get_input("ICNB_transit_router", node));
+
+    port_binding_get_input_data(node, &pb_input);
+    pb_input.runned_az = eng_ctx->client_ctx;
+
+    const struct icnbrec_transit_router *inb_tr;
+    ICNBREC_TRANSIT_ROUTER_TABLE_FOR_EACH_TRACKED (inb_tr, inb_tr_table) {
+        struct icsbrec_port_binding *isb_pb = NULL;
+        if (icnbrec_transit_router_is_deleted(inb_tr)) {
+            if (inb_tr->n_ports > 0 && inb_tr->ports[0]) {
+                char *port_name = inb_tr->ports[0]->name;
+                isb_pb = find_isb_pb_by_name(&pb_input, port_name);
+            }
+            if (isb_pb && (!strcmp(isb_pb->type, "transit-router-port"))) {
+                icsbrec_port_binding_delete(isb_pb);
+            }
+        }
+    }
+
+    return EN_HANDLED_UPDATED;
+}
+
+enum engine_input_handler_result
+port_binding_icnb_transit_router_port_handler(struct engine_node *node,
+                                              void *data)
+{
+    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct ed_type_port_binding *pb_data = data;
+    struct pb_input pb_input;
+
+    const struct icnbrec_transit_router_port_table *inb_trp_table =
+        EN_OVSDB_GET(engine_get_input("ICNB_transit_router_port", node));
+    const struct icnbrec_transit_router_table *inb_tr_table =
+        EN_OVSDB_GET(engine_get_input("ICNB_transit_router", node));
+    const struct nbrec_logical_router_table *nb_lr_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_router", node));
+
+    port_binding_get_input_data(node, &pb_input);
+    pb_input.runned_az = eng_ctx->client_ctx;
+
+    const struct icsbrec_port_binding *isb_pb = NULL;
+    const struct icnbrec_transit_router_port *inb_trp;
+    const struct icnbrec_transit_router *inb_tr;
+    ICNBREC_TRANSIT_ROUTER_PORT_TABLE_FOR_EACH_TRACKED (inb_trp,
+                                                        inb_trp_table) {
+        if (icnbrec_transit_router_port_is_deleted(inb_trp)) {
+            const struct nbrec_logical_router_port *lrp =
+                get_lrp_by_lrp_name(pb_input.nbrec_lrp_by_name, inb_trp->name);
+            const struct nbrec_logical_router *lr =
+                find_lr_from_lrp(nb_lr_table, lrp);
+            if (lrp && lr) {
+                nbrec_logical_router_update_ports_delvalue(lr, lrp);
+                nbrec_logical_router_port_delete(lrp);
+            }
+        } else if (icnbrec_transit_router_port_is_new(inb_trp)) {
+            inb_tr = find_tr_from_trp(inb_tr_table, inb_trp);
+            if (inb_tr) {
+                if (!isb_pb) {
+                    isb_pb = create_isb_pb(eng_ctx, inb_trp->name,
+                                           pb_input.runned_az, inb_tr->name,
+                                           &inb_tr->header_.uuid,
+                                           "transit-router-port",
+                                           &pb_data->pb_tnlids);
+                    icsbrec_port_binding_set_address(isb_pb, inb_trp->mac);
+                }
+            }
+        } else {
+            isb_pb = find_isb_pb_by_name(&pb_input, inb_trp->name);
+            if (isb_pb) {
+                icsbrec_port_binding_set_address(isb_pb, inb_trp->mac);
+            }
+        }
+    }
+
+    return EN_HANDLED_UPDATED;
 }
