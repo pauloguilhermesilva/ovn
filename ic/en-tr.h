@@ -20,4 +20,9 @@ void *en_tr_init(struct engine_node *, struct engine_arg *);
 enum engine_node_state en_tr_run(struct engine_node *, void *data);
 void en_tr_cleanup(void *data);
 
+enum engine_input_handler_result
+tr_icnb_transit_router_handler(struct engine_node *node, void *data);
+enum engine_input_handler_result
+tr_nb_logical_router_handler(struct engine_node *node, void *data);
+
 #endif

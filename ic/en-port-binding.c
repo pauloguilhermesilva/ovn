@@ -350,6 +350,7 @@ port_binding_run(const struct engine_context *eng_ctx,
                                       isb_pb->logical_port);
             } else {
                 shash_add(&remote_pbs, isb_pb->logical_port, isb_pb);
+                ovn_add_tnlid(&pb_data->pb_tnlids, isb_pb->tunnel_key);
             }
         }
         icsbrec_port_binding_index_destroy_row(isb_pb_key);
@@ -371,10 +372,8 @@ port_binding_run(const struct engine_context *eng_ctx,
                         eng_ctx, sb_pb->logical_port, pb_input->runned_az,
                         ts->name, &ts->header_.uuid, "transit-switch-port",
                         &pb_data->pb_tnlids);
-                    sync_remote_port(pb_input, isb_pb, lsp, sb_pb);
-                } else {
-                    sync_local_port(pb_input, isb_pb, sb_pb, lsp);
                 }
+                sync_local_port(pb_input, isb_pb, sb_pb, lsp);
 
                 if (isb_pb->type) {
                     icsbrec_port_binding_set_type(isb_pb,
@@ -453,6 +452,7 @@ port_binding_run(const struct engine_context *eng_ctx,
                                       isb_pb->logical_port);
             } else {
                 shash_add(&remote_pbs, isb_pb->logical_port, isb_pb);
+                ovn_add_tnlid(&pb_data->pb_tnlids, isb_pb->tunnel_key);
             }
         }
         icsbrec_port_binding_index_destroy_row(isb_pb_key);
@@ -1238,9 +1238,31 @@ pb_sb_classify(struct pb_input *pb_input,
                 return sb_pb_interconn_untreatable;
             }
         }
-    } else if (!strcmp(sb_pb->type, "remote")) {
+    } else if (sb_pb->type && !strcmp(sb_pb->type, "remote")) {
         /* LSP - remote port*/
         return sb_pb_interconn_remote_port;
+    } else if (sb_pb->type && !strcmp(sb_pb->type, "patch") &&
+               smap_get(&sb_pb->options, "peer")) {
+        /* LSP type "switch" - local port: has type="patch" and peer option
+         * in SB but no "router" mac (n_mac=0), unlike router-connected LSPs.
+         * Confirm by looking up the NB LSP type. */
+        *nb_lsp = find_nb_lsp_from_sb_pb(pb_input, sb_pb);
+        if (!*nb_lsp || strcmp((*nb_lsp)->type, "switch")) {
+            return sb_pb_interconn_untreatable;
+        }
+        *isb_pb = find_isb_pb_by_name(pb_input, sb_pb->logical_port);
+        *nb_ls = find_ls_from_lsp(nb_ls_table, *nb_lsp);
+        if (!*nb_ls) {
+            return sb_pb_interconn_untreatable;
+        }
+        const char *ts_name = smap_get(&(*nb_ls)->other_config, "interconn-ts");
+        if (ts_name) {
+            *inb_ts = find_inb_ts_by_name(pb_input, ts_name);
+            if (*inb_ts) {
+                return sb_pb_interconn_local_port_lsp;
+            }
+        }
+        return sb_pb_interconn_untreatable;
     } else {
         return sb_pb_interconn_untreatable;
     }
@@ -1310,6 +1332,15 @@ port_binding_sb_port_binding_handler(struct engine_node *node,
             if (pb_sb_function == sb_pb_interconn_remote_port) {
                 if (isb_pb) {
                     sync_remote_port(&pb_input, isb_pb, nb_lsp, sb_pb);
+                }
+            } else if (pb_sb_function == sb_pb_interconn_local_port_lsp) {
+                /* SB pb updated (e.g. type/peer set by northd after initial
+                 * insert). Create ICSB pb if it doesn't exist yet. */
+                if (!isb_pb) {
+                    compose_create_isb_pb(eng_ctx, &pb_input, pb_data, sb_pb,
+                                          nb_lsp, isb_pb, inb_ts);
+                } else {
+                    sync_local_port(&pb_input, isb_pb, sb_pb, nb_lsp);
                 }
             } else if (pb_sb_function == sb_pb_interconn_local_port_lrp) {
                 if (isb_pb) {
@@ -1420,12 +1451,19 @@ port_binding_icsb_port_binding_handler(struct engine_node *node,
                             isb_pb->logical_port, isb_pb);
                 ovn_add_tnlid(&pb_data->pb_tnlids, isb_pb->tunnel_key);
             } else {
-                const struct nbrec_logical_router_port *lrp;
                 const struct nbrec_logical_router *lr =
                     find_tr_in_nb(&pb_input, isb_pb->transit_switch);
                 const struct icnbrec_transit_router_port *trp =
                     find_inb_trp_by_name(&pb_input, isb_pb->logical_port);
-                lrp = lrp_create(eng_ctx, lr, trp);
+                if (!lr || !trp) {
+                    return EN_UNHANDLED;
+                }
+                const struct nbrec_logical_router_port *lrp =
+                    get_lrp_by_lrp_name(pb_input.nbrec_lrp_by_name,
+                                        trp->name);
+                if (!lrp) {
+                    lrp = lrp_create(eng_ctx, lr, trp);
+                }
                 sync_router_port(isb_pb, trp, lrp);
             }
         } else {
@@ -1442,6 +1480,9 @@ port_binding_icsb_port_binding_handler(struct engine_node *node,
                     continue;
                 }
                 sb_pb = find_lsp_in_sb(&pb_input, nb_lsp);
+                if (!sb_pb) {
+                    continue;
+                }
                 sync_remote_port(&pb_input, isb_pb, nb_lsp, sb_pb);
             }
         }
@@ -1485,7 +1526,6 @@ enum engine_input_handler_result
 port_binding_icnb_transit_router_port_handler(struct engine_node *node,
                                               void *data)
 {
-    VLOG_INFO("DBG-PG - - %s : %s : %d", __FILE__, __func__, __LINE__);
     const struct engine_context *eng_ctx = engine_get_context();
     struct ed_type_port_binding *pb_data = data;
     struct pb_input pb_input;
@@ -1500,7 +1540,6 @@ port_binding_icnb_transit_router_port_handler(struct engine_node *node,
     port_binding_get_input_data(node, &pb_input);
     pb_input.runned_az = eng_ctx->client_ctx;
 
-    const struct icsbrec_port_binding *isb_pb = NULL;
     const struct icnbrec_transit_router_port *inb_trp;
     const struct icnbrec_transit_router *inb_tr;
     ICNBREC_TRANSIT_ROUTER_PORT_TABLE_FOR_EACH_TRACKED (inb_trp,
@@ -1515,19 +1554,28 @@ port_binding_icnb_transit_router_port_handler(struct engine_node *node,
                 nbrec_logical_router_port_delete(lrp);
             }
         } else if (icnbrec_transit_router_port_is_new(inb_trp)) {
+            /* Only the AZ local to this port's chassis creates the ICSB pb.
+             * The remote AZ learns the port from the ICSB pb via
+             * port_binding_icsb_port_binding_handler. Both AZs creating an
+             * ICSB pb for the same logical_port causes transaction conflicts. */
+            if (trp_is_remote(&pb_input, inb_trp->chassis)) {
+                continue;
+            }
             inb_tr = find_tr_from_trp(inb_tr_table, inb_trp);
             if (inb_tr) {
-                if (!isb_pb) {
-                    isb_pb = create_isb_pb(eng_ctx, inb_trp->name,
-                                           pb_input.runned_az, inb_tr->name,
-                                           &inb_tr->header_.uuid,
-                                           "transit-router-port",
-                                           &pb_data->pb_tnlids);
-                    icsbrec_port_binding_set_address(isb_pb, inb_trp->mac);
+                const struct icsbrec_port_binding *new_isb_pb =
+                    create_isb_pb(eng_ctx, inb_trp->name,
+                                  pb_input.runned_az, inb_tr->name,
+                                  &inb_tr->header_.uuid,
+                                  "transit-router-port",
+                                  &pb_data->pb_tnlids);
+                if (new_isb_pb) {
+                    icsbrec_port_binding_set_address(new_isb_pb, inb_trp->mac);
                 }
             }
         } else {
-            isb_pb = find_isb_pb_by_name(&pb_input, inb_trp->name);
+            const struct icsbrec_port_binding *isb_pb =
+                find_isb_pb_by_name(&pb_input, inb_trp->name);
             if (isb_pb) {
                 icsbrec_port_binding_set_address(isb_pb, inb_trp->mac);
             }

@@ -917,8 +917,8 @@ main(int argc, char *argv[])
 
                 if (!ovsdb_idl_loop_commit_and_wait(&ovnisb_idl_loop)) {
                     VLOG_INFO("OVNISB commit failed, "
-                                "DISABLE force recompute next time.");
-                    //inc_proc_ic_force_recompute_immediate();
+                                "force recompute next time.");
+                    inc_proc_ic_force_recompute_immediate();
                 }
             } else {
                 /* Make sure we send any pending requests, e.g., lock. */

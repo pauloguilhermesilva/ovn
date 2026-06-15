@@ -179,8 +179,8 @@ inc_proc_ic_init(struct ovsdb_idl_loop *nb,
      * Define relationships between nodes where first argument is dependent
      * on the second argument.
      */
-    engine_add_input(&en_gateway, &en_icsb_gateway, NULL);
-    engine_add_input(&en_gateway, &en_sb_chassis, NULL);
+    engine_add_input(&en_gateway, &en_icsb_gateway, gateway_icsb_gateway_handler);
+    engine_add_input(&en_gateway, &en_sb_chassis, gateway_sb_chassis_handler);
 
     /*
      * In enum_datapath engine, the transit_switch table is used
@@ -212,9 +212,14 @@ inc_proc_ic_init(struct ovsdb_idl_loop *nb,
 
     engine_add_input(&en_tr, &en_enum_datapaths, engine_noop_handler);
     engine_add_input(&en_tr, &en_icsb_datapath_binding, engine_noop_handler);
-    engine_add_input(&en_tr, &en_nb_logical_router, NULL);
-    engine_add_input(&en_tr, &en_icnb_transit_router, NULL);
-    engine_add_input(&en_tr, &en_icnb_transit_router_port, NULL);
+    engine_add_input(&en_tr, &en_nb_logical_router,
+                     tr_nb_logical_router_handler);
+    engine_add_input(&en_tr, &en_icnb_transit_router,
+                     tr_icnb_transit_router_handler);
+    /* Transit router ports are not used by the TR node; any change there
+     * does not require reprocessing. */
+    engine_add_input(&en_tr, &en_icnb_transit_router_port,
+                     engine_noop_handler);
 
     /* No need for an explicit handler for the ICNB transit_switch changes.*/
     engine_add_input(&en_port_binding, &en_ts, engine_noop_handler);

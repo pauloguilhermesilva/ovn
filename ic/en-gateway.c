@@ -57,6 +57,12 @@ sync_isb_gw_to_sb(const struct engine_context *ctx,
 static bool
 is_gateway_data_changed(const struct icsbrec_gateway *gw,
                         const struct sbrec_chassis *chassis);
+static const struct sbrec_chassis *
+find_sbrec_chassis_by_name(struct ovsdb_idl_index *sbrec_chassis_by_name,
+                           const char *name);
+static const struct icsbrec_gateway *
+find_icsb_gateway_for_az(const struct icsbrec_gateway_table *gw_table,
+                         const char *gw_name, const char *az_name);
 
 enum engine_node_state
 en_gateway_run(struct engine_node *node, void *data)
@@ -265,4 +271,199 @@ sync_sb_gw_to_isb(const struct engine_context *ctx,
     icsbrec_gateway_set_encaps(gw, isb_encaps,
                               chassis->n_encaps);
     free(isb_encaps);
+}
+
+static const struct sbrec_chassis *
+find_sbrec_chassis_by_name(struct ovsdb_idl_index *sbrec_chassis_by_name,
+                           const char *name)
+{
+    struct sbrec_chassis *key =
+        sbrec_chassis_index_init_row(sbrec_chassis_by_name);
+    sbrec_chassis_index_set_name(key, name);
+    const struct sbrec_chassis *chassis =
+        sbrec_chassis_index_find(sbrec_chassis_by_name, key);
+    sbrec_chassis_index_destroy_row(key);
+    return chassis;
+}
+
+static const struct icsbrec_gateway *
+find_icsb_gateway_for_az(const struct icsbrec_gateway_table *gw_table,
+                         const char *gw_name, const char *az_name)
+{
+    const struct icsbrec_gateway *gw;
+    ICSBREC_GATEWAY_TABLE_FOR_EACH (gw, gw_table) {
+        if (!strcmp(gw->name, gw_name) &&
+            gw->availability_zone &&
+            !strcmp(gw->availability_zone->name, az_name)) {
+            return gw;
+        }
+    }
+    return NULL;
+}
+
+/* Incremental handler for ICSB gateway table changes.
+ * Handles new/deleted/updated remote gateways by syncing SB chassis entries.
+ * Local gateways (owned by this AZ) are driven by the SB chassis handler. */
+enum engine_input_handler_result
+gateway_icsb_gateway_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct engine_context *eng_ctx = engine_get_context();
+    const struct icsbrec_availability_zone *runned_az = eng_ctx->client_ctx;
+
+    if (!eng_ctx->ovnsb_idl_txn) {
+        return EN_UNHANDLED;
+    }
+
+    const struct icsbrec_gateway_table *icsb_gateway_table =
+        EN_OVSDB_GET(engine_get_input("ICSB_gateway", node));
+
+    struct ovsdb_idl_index *sbrec_chassis_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("SB_chassis", node),
+            "sbrec_chassis_by_name");
+
+    bool changed = false;
+    const struct icsbrec_gateway *gw;
+    ICSBREC_GATEWAY_TABLE_FOR_EACH_TRACKED (gw, icsb_gateway_table) {
+        /* Only handle gateways from other AZs (remote gateways).
+         * Our own gateways are managed via the SB chassis handler. */
+        bool is_local = (gw->availability_zone == runned_az);
+
+        if (icsbrec_gateway_is_deleted(gw)) {
+            if (is_local) {
+                continue;
+            }
+            changed = true;
+            /* Remote gateway deleted: remove corresponding SB chassis. */
+            const struct sbrec_chassis *chassis =
+                find_sbrec_chassis_by_name(sbrec_chassis_by_name, gw->name);
+            if (chassis &&
+                smap_get_bool(&chassis->other_config, "is-remote", false)) {
+                sbrec_chassis_delete(chassis);
+            }
+        } else if (icsbrec_gateway_is_new(gw)) {
+            if (is_local) {
+                continue;
+            }
+            changed = true;
+            /* New remote gateway: create SB chassis for it. */
+            const struct sbrec_chassis *chassis =
+                sbrec_chassis_insert(eng_ctx->ovnsb_idl_txn);
+            sbrec_chassis_set_name(chassis, gw->name);
+            sync_isb_gw_to_sb(eng_ctx, gw, chassis);
+        } else {
+            /* Updated gateway. */
+            if (is_local) {
+                continue;
+            }
+            changed = true;
+            /* Sync remote gateway changes to SB chassis. */
+            const struct sbrec_chassis *chassis =
+                find_sbrec_chassis_by_name(sbrec_chassis_by_name, gw->name);
+            if (chassis) {
+                if (is_gateway_data_changed(gw, chassis)) {
+                    sync_isb_gw_to_sb(eng_ctx, gw, chassis);
+                }
+            } else {
+                /* Chassis missing for a known remote gateway: recreate it. */
+                chassis = sbrec_chassis_insert(eng_ctx->ovnsb_idl_txn);
+                sbrec_chassis_set_name(chassis, gw->name);
+                sync_isb_gw_to_sb(eng_ctx, gw, chassis);
+            }
+        }
+    }
+
+    if (changed) {
+        return EN_HANDLED_UPDATED;
+    }
+    return EN_HANDLED_UNCHANGED;
+}
+
+/* Incremental handler for SB chassis table changes.
+ * Handles new/deleted/updated interconnect chassis by syncing ICSB gateway
+ * entries.  Remote chassis (is-remote) are managed by the ICSB gateway
+ * handler and are ignored here. */
+enum engine_input_handler_result
+gateway_sb_chassis_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct engine_context *eng_ctx = engine_get_context();
+    const struct icsbrec_availability_zone *runned_az = eng_ctx->client_ctx;
+
+    if (!eng_ctx->ovnisb_idl_txn) {
+        return EN_UNHANDLED;
+    }
+
+    const struct sbrec_chassis_table *sb_chassis_table =
+        EN_OVSDB_GET(engine_get_input("SB_chassis", node));
+    const struct icsbrec_gateway_table *icsb_gateway_table =
+        EN_OVSDB_GET(engine_get_input("ICSB_gateway", node));
+
+    bool changed = false;
+    const struct sbrec_chassis *chassis;
+    SBREC_CHASSIS_TABLE_FOR_EACH_TRACKED (chassis, sb_chassis_table) {
+        bool is_interconn =
+            smap_get_bool(&chassis->other_config, "is-interconn", false);
+        bool is_remote =
+            smap_get_bool(&chassis->other_config, "is-remote", false);
+
+        /* Remote chassis are created/deleted by the ICSB gateway handler. */
+        if (is_remote) {
+            continue;
+        }
+
+        if (sbrec_chassis_is_deleted(chassis)) {
+            /* Deleted chassis may have been an interconnect gateway.
+             * If an ICSB gateway entry exists for it, remove it. */
+            const struct icsbrec_gateway *gw =
+                find_icsb_gateway_for_az(icsb_gateway_table, chassis->name,
+                                         runned_az->name);
+            if (gw) {
+                changed = true;
+                icsbrec_gateway_delete(gw);
+            }
+        } else if (sbrec_chassis_is_new(chassis)) {
+            if (!is_interconn) {
+                continue;
+            }
+            changed = true;
+            /* New interconnect chassis: create ICSB gateway. */
+            const struct icsbrec_gateway *gw =
+                icsbrec_gateway_insert(eng_ctx->ovnisb_idl_txn);
+            icsbrec_gateway_set_availability_zone(gw, runned_az);
+            icsbrec_gateway_set_name(gw, chassis->name);
+            sync_sb_gw_to_isb(eng_ctx, chassis, gw);
+        } else {
+            /* Updated chassis. */
+            const struct icsbrec_gateway *gw =
+                find_icsb_gateway_for_az(icsb_gateway_table, chassis->name,
+                                         runned_az->name);
+            if (!is_interconn) {
+                /* The chassis lost its interconnect role.  If there is a
+                 * stale ICSB gateway entry for it, remove it now. */
+                if (gw) {
+                    changed = true;
+                    icsbrec_gateway_delete(gw);
+                }
+            } else {
+                /* Interconnect chassis still active: sync or recreate the
+                 * ICSB gateway entry if needed. */
+                changed = true;
+                if (gw) {
+                    if (is_gateway_data_changed(gw, chassis)) {
+                        sync_sb_gw_to_isb(eng_ctx, chassis, gw);
+                    }
+                } else {
+                    gw = icsbrec_gateway_insert(eng_ctx->ovnisb_idl_txn);
+                    icsbrec_gateway_set_availability_zone(gw, runned_az);
+                    icsbrec_gateway_set_name(gw, chassis->name);
+                    sync_sb_gw_to_isb(eng_ctx, chassis, gw);
+                }
+            }
+        }
+    }
+
+    if (changed) {
+        return EN_HANDLED_UPDATED;
+    }
+    return EN_HANDLED_UNCHANGED;
 }
