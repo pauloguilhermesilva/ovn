@@ -1520,6 +1520,293 @@ collect_lr_routes(struct route_input *ic,
     }
 }
 
+/* Incremental handler for NB global table changes.
+ * Returns EN_UNHANDLED if the options column (which carries all
+ * ic-route-* knobs) was modified; otherwise the change has no impact on
+ * route processing and can be ignored. */
+enum engine_input_handler_result
+route_nb_nb_global_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct nbrec_nb_global_table *nb_global_table =
+        EN_OVSDB_GET(engine_get_input("NB_nb_global", node));
+
+    const struct nbrec_nb_global *nb_global;
+    NBREC_NB_GLOBAL_TABLE_FOR_EACH_TRACKED (nb_global, nb_global_table) {
+        if (nbrec_nb_global_is_new(nb_global) ||
+            nbrec_nb_global_is_deleted(nb_global) ||
+            nbrec_nb_global_is_updated(nb_global,
+                                       NBREC_NB_GLOBAL_COL_OPTIONS)) {
+            return EN_UNHANDLED;
+        }
+    }
+    return EN_HANDLED_UNCHANGED;
+}
+
+/* Incremental handler for NB logical switch changes.
+ * The route engine only uses the NB logical switch to look up the transit
+ * switch representation and its ports.  Structural changes (new/deleted
+ * switch or port/name modifications) require a full recompute; metadata-only
+ * changes (ACLs, QoS, external_ids, …) are irrelevant to route processing. */
+enum engine_input_handler_result
+route_nb_logical_switch_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct nbrec_logical_switch_table *nb_ls_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_switch", node));
+
+    const struct nbrec_logical_switch *ls;
+    NBREC_LOGICAL_SWITCH_TABLE_FOR_EACH_TRACKED (ls, nb_ls_table) {
+        if (nbrec_logical_switch_is_new(ls) ||
+            nbrec_logical_switch_is_deleted(ls) ||
+            nbrec_logical_switch_is_updated(ls, NBREC_LOGICAL_SWITCH_COL_NAME) ||
+            nbrec_logical_switch_is_updated(ls,
+                                            NBREC_LOGICAL_SWITCH_COL_PORTS)) {
+            return EN_UNHANDLED;
+        }
+    }
+    return EN_HANDLED_UNCHANGED;
+}
+
+/* Incremental handler for NB logical router changes.
+ * The STATIC_ROUTES column is covered by route_nb_logical_router_static_route_handler.
+ * Any other column update or new/deleted router requires a full recompute.
+ *
+ * The OVSDB IDL propagates tracking to parent rows when a referenced child
+ * row changes (e.g. an LRP row update causes the parent LR to appear in the
+ * tracked list even though no LR column was directly modified).  We must
+ * detect this case and trigger a recompute when routing-relevant LRP options
+ * (such as "route_table") change. */
+enum engine_input_handler_result
+route_nb_logical_router_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct nbrec_logical_router_table *nb_lr_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_router", node));
+
+    const struct nbrec_logical_router *lr;
+    NBREC_LOGICAL_ROUTER_TABLE_FOR_EACH_TRACKED (lr, nb_lr_table) {
+        if (nbrec_logical_router_is_new(lr) ||
+            nbrec_logical_router_is_deleted(lr)) {
+            return EN_UNHANDLED;
+        }
+
+        /* Trigger a recompute for any column change except STATIC_ROUTES,
+         * which is handled by route_nb_logical_router_static_route_handler. */
+        enum nbrec_logical_router_column_id col;
+        for (col = 0; col < NBREC_LOGICAL_ROUTER_N_COLUMNS; col++) {
+            if (col == NBREC_LOGICAL_ROUTER_COL_STATIC_ROUTES) {
+                continue;
+            }
+            if (nbrec_logical_router_is_updated(lr, col)) {
+                return EN_UNHANDLED;
+            }
+        }
+
+        /* The LR may appear in the tracked list because a referenced LRP
+         * row was modified (e.g. its options/route_table changed), even
+         * though no LR column itself was updated.  Check each port. */
+        for (size_t i = 0; i < lr->n_ports; i++) {
+            if (nbrec_logical_router_port_row_get_seqno(
+                    lr->ports[i], OVSDB_IDL_CHANGE_MODIFY) > 0) {
+                return EN_UNHANDLED;
+            }
+        }
+    }
+    return EN_HANDLED_UNCHANGED;
+}
+
+/* Incremental handler for NB static route changes.
+ * Routes carrying the "ic-learned-route" external-id were written by this
+ * engine as part of ISB→NB sync; creating, updating or deleting them is an
+ * expected side-effect of our own processing and never requires a further
+ * recompute.  Any other static-route change (user-managed routes) may affect
+ * what we advertise to ISB and therefore demands a full recompute. */
+enum engine_input_handler_result
+route_nb_logical_router_static_route_handler(struct engine_node *node,
+                                             void *data OVS_UNUSED)
+{
+    const struct nbrec_logical_router_static_route_table *nb_route_table =
+        EN_OVSDB_GET(engine_get_input(
+            "NB_logical_router_static_route", node));
+
+    const struct nbrec_logical_router_static_route *nb_route;
+    NBREC_LOGICAL_ROUTER_STATIC_ROUTE_TABLE_FOR_EACH_TRACKED (nb_route,
+                                                              nb_route_table) {
+        if (!smap_get(&nb_route->external_ids, "ic-learned-route")) {
+            /* User-managed route: may need re-advertising. */
+            return EN_UNHANDLED;
+        }
+        /* Learned route: change is a consequence of our own ISB→NB sync. */
+    }
+    return EN_HANDLED_UNCHANGED;
+}
+
+/* Incremental handler for ICSB route changes.
+ *
+ * New routes (any AZ):
+ *   - always trigger a full recompute.  Remote new routes need the full router
+ *     context (nexthop resolution, route_need_learn checks).  Local new routes
+ *     (our own advertisement written in the previous run) must also trigger a
+ *     recompute so that other routers in the same AZ can learn from them.
+ *
+ * Routes belonging to our own AZ:
+ *   - deleted: an external agent removed one of our advertised routes; trigger
+ *     a full recompute so it gets re-advertised.
+ *   - updated: treat as own write-back; skip if only metadata changed.
+ *
+ * Routes belonging to other AZs:
+ *   - deleted: find the matching NB learned static route (identified by the
+ *     "ic-learned-route" external-id) and remove it directly.
+ *   - updated with core-field changes (ip_prefix, nexthop, origin,
+ *     route_table): fall back to full recompute.
+ *   - updated with only metadata changes (external_ids, …): no NB change
+ *     is needed because the ISB UUID – which is what we store in
+ *     "ic-learned-route" – does not change on an update. */
+enum engine_input_handler_result
+route_icsb_route_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct engine_context *eng_ctx = engine_get_context();
+    const struct icsbrec_availability_zone *runned_az = eng_ctx->client_ctx;
+
+    if (!eng_ctx->ovnnb_idl_txn) {
+        return EN_UNHANDLED;
+    }
+
+    const struct icsbrec_route_table *icsb_route_table =
+        EN_OVSDB_GET(engine_get_input("ICSB_route", node));
+    const struct nbrec_logical_router_table *nb_lr_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_router", node));
+
+    bool changed = false;
+    const struct icsbrec_route *isb_route;
+    ICSBREC_ROUTE_TABLE_FOR_EACH_TRACKED (isb_route, icsb_route_table) {
+        /* Any new route — local or remote — requires a full recompute.
+         * Local new routes are our own write-backs, but other routers in
+         * the same AZ may still need to learn from them. */
+        if (icsbrec_route_is_new(isb_route)) {
+            return EN_UNHANDLED;
+        }
+
+        bool is_local = (isb_route->availability_zone == runned_az);
+
+        if (is_local) {
+            if (icsbrec_route_is_deleted(isb_route)) {
+                /* Our advertised route was removed externally; re-advertise. */
+                return EN_UNHANDLED;
+            }
+            /* Our own advertisement was updated; nothing to do for learning. */
+            continue;
+        }
+
+        if (icsbrec_route_is_deleted(isb_route)) {
+            /* Remove the corresponding NB learned static route.
+             * The "lr-id" external-id in the ISB route refers to the LR UUID
+             * in the *advertising* AZ, which is a different database.  Instead,
+             * scan local NB LRs for the static route whose "ic-learned-route"
+             * external-id matches the deleted ISB route's UUID. */
+            const struct nbrec_logical_router *lr;
+            NBREC_LOGICAL_ROUTER_TABLE_FOR_EACH (lr, nb_lr_table) {
+                bool found = false;
+                for (int i = 0; i < lr->n_static_routes; i++) {
+                    const struct nbrec_logical_router_static_route *nb_route =
+                        lr->static_routes[i];
+                    struct uuid learned_uuid;
+                    if (smap_get_uuid(&nb_route->external_ids,
+                                      "ic-learned-route", &learned_uuid) &&
+                        uuid_equals(&learned_uuid, &isb_route->header_.uuid)) {
+                        nbrec_logical_router_update_static_routes_delvalue(
+                            lr, nb_route);
+                        changed = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        /* Updated route from another AZ. */
+        if (icsbrec_route_is_updated(isb_route,
+                                     ICSBREC_ROUTE_COL_IP_PREFIX) ||
+            icsbrec_route_is_updated(isb_route, ICSBREC_ROUTE_COL_NEXTHOP) ||
+            icsbrec_route_is_updated(isb_route, ICSBREC_ROUTE_COL_ORIGIN) ||
+            icsbrec_route_is_updated(isb_route,
+                                     ICSBREC_ROUTE_COL_ROUTE_TABLE) ||
+            icsbrec_route_is_updated(isb_route,
+                                     ICSBREC_ROUTE_COL_TRANSIT_SWITCH) ||
+            icsbrec_route_is_updated(isb_route,
+                                     ICSBREC_ROUTE_COL_EXTERNAL_IDS)) {
+            /* Route or its metadata (e.g. ic-route-tag) changed; the tag is
+             * used in filter decisions so a full recompute is required. */
+            return EN_UNHANDLED;
+        }
+    }
+
+    return changed ? EN_HANDLED_UPDATED : EN_HANDLED_UNCHANGED;
+}
+
+/* Incremental handler for ICSB port binding changes.
+ * Structural changes – new or deleted port bindings, or changes to the fields
+ * that determine the IC router map (address, logical_port, transit_switch,
+ * availability_zone, type, encap) – require a full recompute because they
+ * affect nexthop resolution and the set of routers participating in IC.
+ * Changes to metadata-only fields (external_ids, tunnel_key, gateway,
+ * nb_ic_uuid) have no impact on route calculation. */
+enum engine_input_handler_result
+route_icsb_port_binding_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct icsbrec_port_binding_table *isb_pb_table =
+        EN_OVSDB_GET(engine_get_input("ICSB_port_binding", node));
+
+    const struct icsbrec_port_binding *isb_pb;
+    ICSBREC_PORT_BINDING_TABLE_FOR_EACH_TRACKED (isb_pb, isb_pb_table) {
+        if (icsbrec_port_binding_is_new(isb_pb) ||
+            icsbrec_port_binding_is_deleted(isb_pb)) {
+            return EN_UNHANDLED;
+        }
+        if (icsbrec_port_binding_is_updated(isb_pb,
+                ICSBREC_PORT_BINDING_COL_ADDRESS) ||
+            icsbrec_port_binding_is_updated(isb_pb,
+                ICSBREC_PORT_BINDING_COL_LOGICAL_PORT) ||
+            icsbrec_port_binding_is_updated(isb_pb,
+                ICSBREC_PORT_BINDING_COL_TRANSIT_SWITCH) ||
+            icsbrec_port_binding_is_updated(isb_pb,
+                ICSBREC_PORT_BINDING_COL_AVAILABILITY_ZONE) ||
+            icsbrec_port_binding_is_updated(isb_pb,
+                ICSBREC_PORT_BINDING_COL_TYPE) ||
+            icsbrec_port_binding_is_updated(isb_pb,
+                ICSBREC_PORT_BINDING_COL_ENCAP)) {
+            return EN_UNHANDLED;
+        }
+    }
+    return EN_HANDLED_UNCHANGED;
+}
+
+/* Incremental handler for ICNB transit switch changes.
+ * A new or deleted transit switch, or a name change, requires a full recompute
+ * because the route engine uses the TS name as the key for route collection
+ * and orphan detection.  Changes to other_config or external_ids do not
+ * affect route processing. */
+enum engine_input_handler_result
+route_icnb_transit_switch_handler(struct engine_node *node,
+                                  void *data OVS_UNUSED)
+{
+    const struct icnbrec_transit_switch_table *icnb_ts_table =
+        EN_OVSDB_GET(engine_get_input("ICNB_transit_switch", node));
+
+    const struct icnbrec_transit_switch *t_sw;
+    ICNBREC_TRANSIT_SWITCH_TABLE_FOR_EACH_TRACKED (t_sw, icnb_ts_table) {
+        if (icnbrec_transit_switch_is_new(t_sw) ||
+            icnbrec_transit_switch_is_deleted(t_sw) ||
+            icnbrec_transit_switch_is_updated(t_sw,
+                                              ICNBREC_TRANSIT_SWITCH_COL_NAME)) {
+            return EN_UNHANDLED;
+        }
+    }
+    return EN_HANDLED_UNCHANGED;
+}
+
 static void
 delete_orphan_ic_routes(struct route_input *ic,
                         const struct icsbrec_availability_zone *az)

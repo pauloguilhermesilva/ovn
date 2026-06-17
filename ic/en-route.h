@@ -67,4 +67,21 @@ void *en_route_init(struct engine_node *, struct engine_arg *);
 enum engine_node_state en_route_run(struct engine_node *, void *data);
 void en_route_cleanup(void *data);
 
+/* Incremental-processing handlers. */
+enum engine_input_handler_result
+route_nb_nb_global_handler(struct engine_node *node, void *data);
+enum engine_input_handler_result
+route_nb_logical_switch_handler(struct engine_node *node, void *data);
+enum engine_input_handler_result
+route_nb_logical_router_handler(struct engine_node *node, void *data);
+enum engine_input_handler_result
+route_nb_logical_router_static_route_handler(struct engine_node *node,
+                                             void *data);
+enum engine_input_handler_result
+route_icsb_route_handler(struct engine_node *node, void *data);
+enum engine_input_handler_result
+route_icsb_port_binding_handler(struct engine_node *node, void *data);
+enum engine_input_handler_result
+route_icnb_transit_switch_handler(struct engine_node *node, void *data);
+
 #endif

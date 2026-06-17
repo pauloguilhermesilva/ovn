@@ -250,14 +250,22 @@ inc_proc_ic_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_port_binding, &en_nb_logical_switch_port,
                      port_binding_nb_logical_switch_port_handler);
 
-    engine_add_input(&en_route, &en_port_binding, NULL);
-    engine_add_input(&en_route, &en_nb_nb_global, NULL);
-    engine_add_input(&en_route, &en_nb_logical_switch, NULL);
-    engine_add_input(&en_route, &en_nb_logical_router, NULL);
-    engine_add_input(&en_route, &en_icnb_transit_switch, NULL);
-    engine_add_input(&en_route, &en_icsb_port_binding, NULL);
-    engine_add_input(&en_route, &en_icsb_route, NULL);
-    engine_add_input(&en_route, &en_nb_logical_router_static_route, NULL);
+    /* en_port_binding output is only an ordering dependency; actual ICSB
+     * port binding data is consumed via en_icsb_port_binding below. */
+    engine_add_input(&en_route, &en_port_binding, engine_noop_handler);
+    engine_add_input(&en_route, &en_nb_nb_global,
+                     route_nb_nb_global_handler);
+    engine_add_input(&en_route, &en_nb_logical_switch,
+                     route_nb_logical_switch_handler);
+    engine_add_input(&en_route, &en_nb_logical_router,
+                     route_nb_logical_router_handler);
+    engine_add_input(&en_route, &en_icnb_transit_switch,
+                     route_icnb_transit_switch_handler);
+    engine_add_input(&en_route, &en_icsb_port_binding,
+                     route_icsb_port_binding_handler);
+    engine_add_input(&en_route, &en_icsb_route, route_icsb_route_handler);
+    engine_add_input(&en_route, &en_nb_logical_router_static_route,
+                     route_nb_logical_router_static_route_handler);
 
     engine_add_input(&en_srv_mon, &en_icsb_service_monitor, NULL);
     engine_add_input(&en_srv_mon, &en_sb_sb_global, NULL);
