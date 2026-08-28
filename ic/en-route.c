@@ -2292,13 +2292,53 @@ route_nb_logical_router_port_handler(struct engine_node *node,
     return ret;
 }
 
+/* Unions the transit switches of every interconnected logical router whose
+ * 'static_routes' column changed in this engine iteration into 'affected'.
+ *
+ * This is how a deleted static route is mapped back to its owner.  The
+ * deleted row can no longer name it, but Logical_Router:static_routes is a
+ * strong reference: a route row cannot outlive its entry in that column, so
+ * removing one always either updates the owner's column or deletes the owner
+ * outright, and both are tracked changes on the Logical_Router table of this
+ * very iteration.
+ *
+ * The deleted-owner half needs nothing here.  An interconnected router that
+ * is deleted already made route_nb_logical_router_handler() fall back, and
+ * the engine stops at the first handler that fails, so this handler does not
+ * run at all in that iteration.  A router that was on no transit switch is
+ * invisible to route processing, and so are the routes that went with it. */
+static void
+route_scope_add_lrs_with_static_route_change(struct engine_node *node,
+                                             struct shash *lr_ts_map,
+                                             struct sset *affected)
+{
+    const struct nbrec_logical_router_table *lr_tbl =
+        EN_OVSDB_GET(engine_get_input("NB_logical_router", node));
+
+    const struct nbrec_logical_router *lr;
+    NBREC_LOGICAL_ROUTER_TABLE_FOR_EACH_TRACKED (lr, lr_tbl) {
+        if (nbrec_logical_router_is_deleted(lr)) {
+            continue;
+        }
+        if (ovsdb_idl_track_is_updated(
+                &lr->header_, &nbrec_logical_router_col_static_routes)) {
+            route_scope_add_lr_uuid(lr_ts_map, &lr->header_.uuid, affected);
+        }
+    }
+}
+
 /* NB Logical_Router_Static_Route: routes this engine created when learning
  * remote routes carry external_ids:ic-learned-route, so their own
  * create/update/delete events must be ignored (otherwise the engine ping-pongs
  * on its own write-backs).  A user-authored static route may need
- * (re)advertising on the transit switches of its owning router.  A deletion
- * can no longer be mapped to its owner (it was removed from the router's
- * static_routes column), so it falls back to a full recompute. */
+ * (re)advertising on the transit switches of its owning router.
+ *
+ * A deletion is scoped through the owner's 'static_routes' column instead of
+ * through the row, which no longer names it - see
+ * route_scope_add_lrs_with_static_route_change().  Deleting a logical router
+ * deletes its static routes with it, so this is the common case in the field
+ * rather than an edge one: it used to charge a full recompute of the route
+ * node to every tenant router teardown, interconnected or not. */
 enum engine_input_handler_result
 route_nb_logical_router_static_route_handler(struct engine_node *node,
                                              void *data)
@@ -2314,7 +2354,7 @@ route_nb_logical_router_static_route_handler(struct engine_node *node,
     struct shash lr_ts_map;
     route_lr_ts_map_init(ctx, runned_az, &lr_ts_map);
     struct sset affected = SSET_INITIALIZER(&affected);
-    bool unhandled = false;
+    bool deleted = false;
 
     const struct nbrec_logical_router_static_route *sr;
     NBREC_LOGICAL_ROUTER_STATIC_ROUTE_TABLE_FOR_EACH_TRACKED (sr, tbl) {
@@ -2323,17 +2363,20 @@ route_nb_logical_router_static_route_handler(struct engine_node *node,
             continue;
         }
         if (nbrec_logical_router_static_route_is_deleted(sr)) {
-            unhandled = true;
-            break;
+            deleted = true;
+            continue;
         }
         /* User route - may need (re)advertising on its router's TSes. */
         route_scope_add_matching_lrs(ctx, &lr_ts_map, lr_has_static_route, sr,
                                      &affected);
     }
+    if (deleted) {
+        route_scope_add_lrs_with_static_route_change(node, &lr_ts_map,
+                                                    &affected);
+    }
 
     enum engine_input_handler_result ret =
-        unhandled ? EN_UNHANDLED
-                  : route_scope_finish(ctx, runned_az, &affected, false, data);
+        route_scope_finish(ctx, runned_az, &affected, false, data);
     sset_destroy(&affected);
     route_lr_ts_map_destroy(&lr_ts_map);
     return ret;

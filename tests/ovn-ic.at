@@ -1191,6 +1191,22 @@ check ovn-nbctl --wait=sb lr-add lr-local
 CHECK_ROUTE_RECOMPUTE([check ovn-nbctl --wait=sb lr-del lr-local],
                       [norecompute])
 
+# The same router, but carrying a user static route of its own.  Deleting the
+# router deletes the route with it: Logical_Router:static_routes is a strong
+# reference, so the row cannot outlive the column entry.  The route reaches
+# route_nb_logical_router_static_route_handler() as a deletion that is not one
+# of ours (no external_ids:ic-learned-route), one input after the router
+# itself.
+#
+# The router is on no transit switch, exactly as in the bare case above, so it
+# must be just as free.
+check ovn-nbctl lr-add lr-local2
+check ovn-nbctl lrp-add lr-local2 lrp-lr-local2-gw aa:aa:aa:aa:aa:03 \
+    192.168.99.1/24
+check ovn-nbctl --wait=sb lr-route-add lr-local2 0.0.0.0/0 192.168.99.254
+CHECK_ROUTE_RECOMPUTE([check ovn-nbctl --wait=sb lr-del lr-local2],
+                      [norecompute])
+
 # Recompute equivalence: a forced full recompute must not change the routing
 # tables this AZ manages.
 check ovn-ic-nbctl --wait=sb sync
