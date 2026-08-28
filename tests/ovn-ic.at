@@ -1168,6 +1168,29 @@ CHECK_ROUTE_RECOMPUTE(
     [check ovn-nbctl set nb_global . options:ic-route-adv-default=true],
     [recompute])
 
+# NB Logical_Router handler: deleting a router that IS on a transit switch
+# cannot be scoped.  Its IC-SB port bindings are being removed in the same
+# step, so the router-to-transit-switch map cannot be trusted to still name
+# every switch it was on, and scoping to a partial set would leave routes
+# behind.
+check ovn-nbctl lr-add lr12
+check ovn-nbctl lrp-add lr12 lrp-lr12-ts1 aa:aa:aa:aa:aa:02 169.254.100.2/24
+check ovn-nbctl --wait=sb lsp-add-router-port ts1 lsp-ts1-lr12 lrp-lr12-ts1
+CHECK_ROUTE_RECOMPUTE([check ovn-nbctl --wait=sb lr-del lr12], [recompute])
+check ovn-nbctl --wait=sb lsp-del lsp-ts1-lr12
+
+# --- ... but a router that is on none of them is not route processing's
+# business at all ---
+
+# route_sync_scope() builds its router set from this AZ's IC-SB port bindings,
+# so a router that never had one contributes nothing and its deletion changes
+# no route.  This used to recompute the whole node: on a deployment where
+# tenant routers come and go without being interconnected, every one of them
+# paid the full cost of the route node for no reason.
+check ovn-nbctl --wait=sb lr-add lr-local
+CHECK_ROUTE_RECOMPUTE([check ovn-nbctl --wait=sb lr-del lr-local],
+                      [norecompute])
+
 # Recompute equivalence: a forced full recompute must not change the routing
 # tables this AZ manages.
 check ovn-ic-nbctl --wait=sb sync
