@@ -1947,6 +1947,22 @@ route_scope_add_lr_uuid(struct shash *lr_ts_map, const struct uuid *lr_uuid,
     }
 }
 
+/* True when 'lr_uuid' attaches to at least one transit switch per
+ * 'lr_ts_map', which is the same as saying that route processing looks at it
+ * at all: route_sync_scope() builds its set of routers from the IC-SB port
+ * bindings of this availability zone, so a router with no port binding
+ * contributes nothing. */
+static bool
+route_lr_is_interconnected(struct shash *lr_ts_map,
+                           const struct uuid *lr_uuid)
+{
+    char *uuid_s = xasprintf(UUID_FMT, UUID_ARGS(lr_uuid));
+    bool interconnected = shash_find_data(lr_ts_map, uuid_s) != NULL;
+    free(uuid_s);
+
+    return interconnected;
+}
+
 typedef bool (*route_lr_match_fn)(const struct nbrec_logical_router *lr,
                                   const void *aux);
 
@@ -2175,9 +2191,18 @@ route_nb_logical_switch_handler(struct engine_node *node,
  * load_balancer or load_balancer_group affects which routes the router
  * advertises.  Scope to the transit switches the router attaches to.  A change
  * limited to the static_routes column is delegated to the static-route handler
- * (which co-fires in the same iteration).  A router deletion can no longer be
- * mapped to its transit switches (its IC-SB port bindings are being removed),
- * so it falls back to a full recompute. */
+ * (which co-fires in the same iteration).
+ *
+ * A deleted router that was attached to a transit switch falls back to a full
+ * recompute: its IC-SB port bindings are being removed at the same time, so
+ * the map that would name those transit switches cannot be trusted to still
+ * be complete, and scoping to a partial set would leave routes behind.
+ *
+ * A deleted router that was on no transit switch is simply ignored.  Route
+ * processing never looked at it - route_sync_scope() builds its router set
+ * from the IC-SB port bindings of this availability zone - so there is
+ * nothing to reconcile.  Recomputing for it used to charge the full cost of
+ * the route node to a change that cannot affect any route. */
 enum engine_input_handler_result
 route_nb_logical_router_handler(struct engine_node *node,
                                 void *data)
@@ -2198,8 +2223,11 @@ route_nb_logical_router_handler(struct engine_node *node,
     const struct nbrec_logical_router *lr;
     NBREC_LOGICAL_ROUTER_TABLE_FOR_EACH_TRACKED (lr, tbl) {
         if (nbrec_logical_router_is_deleted(lr)) {
-            unhandled = true;
-            break;
+            if (route_lr_is_interconnected(&lr_ts_map, &lr->header_.uuid)) {
+                unhandled = true;
+                break;
+            }
+            continue;
         }
         if (nbrec_logical_router_is_new(lr) ||
             ovsdb_idl_track_is_updated(&lr->header_,
